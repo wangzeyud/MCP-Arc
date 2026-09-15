@@ -8,9 +8,9 @@ call — without touching the protocol, and without locking you to a vendor.
 
 ```
 MCP client  ──────▶  MCP Arc  ──────▶  MCP server
-(Claude / Cursor /    │  governance      (node / python / …)
- 国产客户端 …)        │
-                      └─ audit ─▶ SQLite / PostgreSQL
+(Claude Desktop /     │  governance    (node / python / …)
+ Cherry Studio /      │
+ Cursor …)            └─ audit ─▶ SQLite / PostgreSQL
 ```
 
 **Source:** https://github.com/dodoyu-sama/MCP-Arc
@@ -37,16 +37,51 @@ CSV export, and an embedded Vue3 console served by one binary.
   protocol-agnostic plumbing, so spec changes don't force a rewrite.
 - Messages it does not need to touch are forwarded byte-for-byte.
 
-## Quick start
+## Install
+
+MCP Arc ships as a single binary. Pick the path that fits you:
+
+### A. Docker (easiest — no Go or Node needed)
+
+Only Docker is required; the container builds the binary **and** the web console
+for you, so your machine stays clean.
+
+```bash
+docker compose up --build                       # SQLite backend, console on :8080
+docker compose --profile postgres up --build    # PostgreSQL backend
+```
+
+The proxy is then reachable at `http://localhost:8081/sse` (gateway mode). Skip
+ahead to [Wiring into a real client](#wiring-into-a-real-client).
+
+### B. Prebuilt binary (planned for v1.0)
+
+One-command install (script / `brew` / `go install`) and ready-made binaries for
+Windows / macOS / Linux are on the roadmap for **v1.0**. Until then, use Docker
+(Option A) or build from source (Option C).
+
+### C. Build from source (developers)
 
 Requires **Go 1.22+** and a C compiler (CGO) for the SQLite driver.
 
 ```bash
-make build     # builds the web console (web/dist), then ./mcp-arc
-make test
+# 1) build the embedded web console — its files live in web/, NOT the repo root
+cd web && npm install && npm run build && cd ..
+
+# 2) build the binary
+go build -o mcp-arc ./cmd/mcp-arc          # macOS / Linux
+# go build -o mcp-arc.exe ./cmd/mcp-arc   # Windows
 ```
 
-Pipe a couple of JSON-RPC messages through the proxy:
+> ⚠️ If you run `npm install` from the repo root you'll see
+> `ENOENT ... package.json`: the frontend project is in the **`web/`** folder.
+> (The `Makefile`'s `make build` runs both steps, but `make` isn't bundled with
+> Windows — the commands above work on every OS.)
+
+## Quick start
+
+With the `mcp-arc` binary (or the Docker container) ready, pipe two JSON-RPC
+messages through the proxy to watch masking + audit work:
 
 ```bash
 printf '%s\n' \
@@ -55,9 +90,9 @@ printf '%s\n' \
   | ./mcp-arc --upstream "node examples/echo-server/server.js"
 ```
 
-The upstream responses are printed and `mcp-arc.db` is created. In the audit log,
-the email and the `pwd` field above are stored **masked**, while the real request
-still reached the upstream untouched:
+The upstream responses print out and `mcp-arc.db` is created. In the audit log the
+email and the `pwd` field are stored **masked**, while the real request still
+reaches the upstream untouched:
 
 ```bash
 curl -H "Authorization: Bearer change-me" localhost:8080/api/logs
@@ -100,7 +135,13 @@ Clients then connect to `http://host:8081/sse` (GET for the event stream, POST
 
 ## Wiring into a real client
 
-Point your MCP client at `mcp-arc` instead of the real server:
+You don't change your MCP server at all — you just tell your **client** to launch
+MCP Arc and talk to it instead of the server directly.
+
+### Local (stdio, default)
+
+Point the client at the `mcp-arc` binary. This `mcpServers` entry works in
+Claude Desktop, Cursor, Cline, Windsurf, Zed, and most other MCP clients:
 
 ```json
 {
@@ -113,8 +154,40 @@ Point your MCP client at `mcp-arc` instead of the real server:
 }
 ```
 
-If the client supports remote MCP over SSE, run Arc in gateway mode
-(`transport.client: sse`) and give it `http://host:8081/sse`.
+Where to paste it:
+- **Claude Desktop** — `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) or `%APPDATA%\Claude\claude_desktop_config.json` (Windows)
+- **Cursor** — `.cursor/mcp.json` in your project (or `~/.cursor/mcp.json`)
+- **Cherry Studio / Trae / 5ire / Lingma** — Settings → MCP → "add local server" → fill the command + args above
+
+Restart the client afterwards; it spawns `mcp-arc`, which in turn spawns your real
+server. That's the whole setup.
+
+### Remote (SSE gateway)
+
+If you'd rather run Arc as a shared gateway (e.g. the Docker container, or on a
+server), run it in gateway mode and point the client at its SSE URL instead of a
+command:
+
+```yaml
+# config.yaml
+transport:
+  client: sse
+  listen: ":8081"
+  upstream: stdio
+server:
+  upstream: ["node", "/path/to/your-server.js"]
+```
+
+```json
+{
+  "mcpServers": {
+    "my-server-via-mcp-arc": {
+      "type": "sse",
+      "url": "http://host:8081/sse"
+    }
+  }
+}
+```
 
 ## Configuration
 
@@ -209,13 +282,6 @@ curl -X POST -H "Authorization: Bearer change-me" -H "Content-Type: application/
 
 Replay rides the same id-rewrite / response-correlation machinery as a live
 call, so it works for stdio and SSE upstreams alike.
-
-## Docker
-
-```bash
-docker compose up --build                     # SQLite backend, console on :8080
-docker compose --profile postgres up --build  # PostgreSQL backend
-```
 
 ## Roadmap
 

@@ -7,9 +7,9 @@
 
 ```
 MCP client  ──────▶  MCP Arc  ──────▶  MCP server
-(Claude / Cursor /    │  治理层           (node / python / …)
- 国产客户端 …)        │
-                      └─ 审计 ─▶ SQLite / PostgreSQL
+(Claude Desktop /    │  治理层          (node / python / …)
+ Cherry Studio /     │
+ Cursor …)           └─ 审计 ─▶ SQLite / PostgreSQL
 ```
 
 **项目地址：** https://github.com/dodoyu-sama/MCP-Arc
@@ -34,16 +34,49 @@ MCP client  ──────▶  MCP Arc  ──────▶  MCP server
   不需要重写治理层。
 - 不需要处理的消息，逐字节原样转发。
 
-## 快速开始
+## 安装
+
+MCP Arc 是一个单文件二进制。按你的情况选一条路：
+
+### A. Docker（最省事——本机不需要 Go 或 Node）
+
+只需装好 Docker；容器会替你把二进制**和** Web 控制台一起构建好，本机干干净净。
+
+```bash
+docker compose up --build                       # SQLite 后端，控制台在 :8080
+docker compose --profile postgres up --build    # PostgreSQL 后端
+```
+
+构建后代理地址为 `http://localhost:8081/sse`（网关模式）。直接跳到
+[接入真实客户端](#接入真实客户端)。
+
+### B. 预编译二进制（v1.0 提供）
+
+一键安装（脚本 / `brew` / `go install`）以及 Windows / macOS / Linux 的预编译二进制，
+已列入 **v1.0** 路线图。在此之前请用 Docker（方案 A）或从源码构建（方案 C）。
+
+### C. 从源码构建（开发者）
 
 需要 **Go 1.22+** 以及用于 SQLite 驱动的 C 编译器（CGO）。
 
 ```bash
-make build     # 先构建 web 控制台（web/dist），再编译 ./mcp-arc
-make test
+# 1) 构建内嵌的 Web 控制台——前端代码在 web/，不在仓库根目录
+cd web && npm install && npm run build && cd ..
+
+# 2) 编译二进制
+go build -o mcp-arc ./cmd/mcp-arc          # macOS / Linux
+# go build -o mcp-arc.exe ./cmd/mcp-arc   # Windows
 ```
 
-通过代理管道发几条 JSON-RPC 消息：
+> ⚠️ 如果在仓库根目录直接跑 `npm install`，会看到
+> `ENOENT ... package.json`：前端工程在 **`web/`** 目录里。
+> （`Makefile` 里的 `make build` 会一次跑完两步，但 Windows 不自带 `make`——
+> 上面的命令在任何系统都能用。）
+
+## 快速开始
+
+拿到 `mcp-arc` 二进制（或跑起 Docker 容器）后，通过代理管道发两条 JSON-RPC 消息，
+就能看到脱敏 + 审计生效：
 
 ```bash
 printf '%s\n' \
@@ -95,7 +128,13 @@ transport:
 
 ## 接入真实客户端
 
-把 MCP 客户端指向 `mcp-arc`，而非真实服务端：
+你完全不用改自己的 MCP server——只要让**客户端**去启动 MCP Arc、并和它对话，
+而不是直接连 server。
+
+### 本地（stdio，默认）
+
+把客户端指向 `mcp-arc` 二进制。下面这段 `mcpServers` 配置在 Claude Desktop、
+Cursor、Cline、Windsurf、Zed 等绝大多数 MCP 客户端里都能直接用：
 
 ```json
 {
@@ -108,8 +147,38 @@ transport:
 }
 ```
 
-如果客户端支持以 SSE 方式接入远端 MCP，就让 Arc 跑在网关模式
-（`transport.client: sse`），把 `http://host:8081/sse` 填进去即可。
+配置文件放在哪：
+- **Claude Desktop** —— `~/Library/Application Support/Claude/claude_desktop_config.json`（macOS）或 `%APPDATA%\Claude\claude_desktop_config.json`（Windows）
+- **Cursor** —— 项目里的 `.cursor/mcp.json`（或 `~/.cursor/mcp.json`）
+- **Cherry Studio / Trae / 5ire / Lingma** —— 设置 → MCP →「添加本地 server」→ 填入上面的 command 与 args
+
+改完重启客户端即可；它会拉起 `mcp-arc`，`mcp-arc` 再去拉起你真正的 server。整个接入就这一步。
+
+### 远端（SSE 网关）
+
+如果你希望把 Arc 作为一个共享网关来跑（例如用 Docker 容器，或跑在一台服务器上），
+就让它跑在网关模式，然后让客户端填它的 SSE 地址，而不是本地命令：
+
+```yaml
+# config.yaml
+transport:
+  client: sse
+  listen: ":8081"
+  upstream: stdio
+server:
+  upstream: ["node", "/path/to/your-server.js"]
+```
+
+```json
+{
+  "mcpServers": {
+    "my-server-via-mcp-arc": {
+      "type": "sse",
+      "url": "http://host:8081/sse"
+    }
+  }
+}
+```
 
 ## 配置
 
@@ -197,13 +266,6 @@ curl -X POST -H "Authorization: Bearer change-me" -H "Content-Type: application/
 ```
 
 回放复用和实时调用相同的 id 改写 / 响应关联机制，因此 stdio 与 SSE 上游都适用。
-
-## Docker
-
-```bash
-docker compose up --build                     # SQLite 后端，控制台在 :8080
-docker compose --profile postgres up --build  # PostgreSQL 后端
-```
 
 ## 路线图
 

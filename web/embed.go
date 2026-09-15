@@ -5,8 +5,6 @@ package web
 
 import "embed"
 
-// DistFS holds the built Vue frontend output, produced by `npm run build`
-// (which writes to web/dist). It is served by the admin HTTP server.
-//
-//go:embed all:dist
+// DistFS holds the built Vue frontend output when it is available. The
+// generated assets are added to this filesystem by the frontend build step.
 var DistFS embed.FS
