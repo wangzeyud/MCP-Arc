@@ -136,7 +136,7 @@ func TestRuleCRUDHotReloads(t *testing.T) {
 	if err := p.reloadRules(); err != nil {
 		t.Fatal(err)
 	}
-	if out, _ := m.Mask(map[string]interface{}{"mail": "a@b.com"}); out["mail"] != "***" {
+	if out, _ := m.Mask(map[string]any{"mail": "a@b.com"}); out["mail"] != "***" {
 		t.Errorf("seeded rule not active: %#v", out)
 	}
 
@@ -156,7 +156,7 @@ func TestRuleCRUDHotReloads(t *testing.T) {
 	if rule.Fields == nil {
 		t.Error("nil list fields should normalise to an empty slice, not null")
 	}
-	out, _ := m.Mask(map[string]interface{}{"phone": "13800138000"})
+	out, _ := m.Mask(map[string]any{"phone": "13800138000"})
 	if out["phone"] != "[PHONE]" {
 		t.Errorf("new rule did not hot-reload: %#v", out)
 	}
@@ -166,7 +166,7 @@ func TestRuleCRUDHotReloads(t *testing.T) {
 	if err := p.UpdateRule(rule); err != nil {
 		t.Fatal(err)
 	}
-	if out, _ := m.Mask(map[string]interface{}{"phone": "13800138000"}); out["phone"] == "[PHONE]" {
+	if out, _ := m.Mask(map[string]any{"phone": "13800138000"}); out["phone"] == "[PHONE]" {
 		t.Error("a disabled rule must not apply after reload")
 	}
 	if len(store.rules) != 2 {

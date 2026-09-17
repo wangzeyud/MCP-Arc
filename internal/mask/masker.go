@@ -52,7 +52,7 @@ type Finding struct {
 // Detector is the second-pass hook used by LLM-assisted masking. It receives the
 // already statically-masked object and returns the paths still worth redacting.
 type Detector interface {
-	Detect(value map[string]interface{}) ([]Finding, error)
+	Detect(value map[string]any) ([]Finding, error)
 }
 
 // Masker applies rules to a params/result object. Rules can be swapped at
@@ -109,29 +109,22 @@ func (m *Masker) SetDetector(d Detector, applyToResult bool) {
 	m.mu.Unlock()
 }
 
-// DetectorEnabled reports whether a second pass is configured.
-func (m *Masker) DetectorEnabled() bool {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return m.detector != nil
-}
-
 // Mask returns a deep-copied, masked version of params, running the detector
 // second pass when configured.
-func (m *Masker) Mask(params map[string]interface{}) (map[string]interface{}, error) {
+func (m *Masker) Mask(params map[string]any) (map[string]any, error) {
 	return m.mask(params, true)
 }
 
 // MaskResult masks an upstream result. The second pass is skipped unless it was
 // explicitly enabled for results (results are bulkier than arguments).
-func (m *Masker) MaskResult(result map[string]interface{}) (map[string]interface{}, error) {
+func (m *Masker) MaskResult(result map[string]any) (map[string]any, error) {
 	return m.mask(result, false)
 }
 
-func (m *Masker) mask(v map[string]interface{}, isParams bool) (map[string]interface{}, error) {
+func (m *Masker) mask(v map[string]any, isParams bool) (map[string]any, error) {
 	out := deepCopy(v)
 	if out == nil {
-		return map[string]interface{}{}, nil
+		return map[string]any{}, nil
 	}
 	m.mu.RLock()
 	rules := m.rules
@@ -155,9 +148,9 @@ func (m *Masker) mask(v map[string]interface{}, isParams bool) (map[string]inter
 	return out, nil
 }
 
-func (m *Masker) maskValue(v interface{}, path string, rules []Rule) interface{} {
+func (m *Masker) maskValue(v any, path string, rules []Rule) any {
 	switch val := v.(type) {
-	case map[string]interface{}:
+	case map[string]any:
 		for k, v2 := range val {
 			if matchField(rules, k) {
 				val[k] = maskFieldValue(rules, v2)
@@ -166,7 +159,7 @@ func (m *Masker) maskValue(v interface{}, path string, rules []Rule) interface{}
 			}
 		}
 		return val
-	case []interface{}:
+	case []any:
 		for i, item := range val {
 			val[i] = m.maskValue(item, fmt.Sprintf("%s[%d]", path, i), rules)
 		}
@@ -189,7 +182,7 @@ func matchField(rules []Rule, name string) bool {
 	return false
 }
 
-func maskFieldValue(rules []Rule, v interface{}) interface{} {
+func maskFieldValue(rules []Rule, v any) any {
 	if s, ok := v.(string); ok {
 		if masked := maskString(rules, s); masked != s {
 			return masked
@@ -213,16 +206,16 @@ func maskString(rules []Rule, s string) string {
 // The path must resolve to something that already exists: a model may
 // hallucinate one, and inventing a "ghost": "****" entry in the audit record
 // would be worse than missing the redaction.
-func setPath(root map[string]interface{}, path string, val interface{}) bool {
+func setPath(root map[string]any, path string, val any) bool {
 	toks := tokenizePath(path)
 	if len(toks) == 0 {
 		return false
 	}
-	var cur interface{} = root
+	var cur any = root
 	for i, t := range toks {
 		last := i == len(toks)-1
 		switch node := cur.(type) {
-		case map[string]interface{}:
+		case map[string]any:
 			if last {
 				if _, ok := node[t]; !ok {
 					return false
@@ -231,7 +224,7 @@ func setPath(root map[string]interface{}, path string, val interface{}) bool {
 				return true
 			}
 			cur = node[t]
-		case []interface{}:
+		case []any:
 			idx, err := strconv.Atoi(t)
 			if err != nil || idx < 0 || idx >= len(node) {
 				return false
@@ -276,7 +269,7 @@ func tokenizePath(path string) []string {
 // deepCopy clones src via JSON. Numbers are kept in their literal form so the
 // masked copy stored in the audit record stays numerically faithful to what the
 // client sent — a float64 round trip would rewrite large integers.
-func deepCopy(src map[string]interface{}) map[string]interface{} {
+func deepCopy(src map[string]any) map[string]any {
 	if src == nil {
 		return nil
 	}
@@ -286,7 +279,7 @@ func deepCopy(src map[string]interface{}) map[string]interface{} {
 	}
 	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.UseNumber()
-	var dst map[string]interface{}
+	var dst map[string]any
 	if err := dec.Decode(&dst); err != nil {
 		return src
 	}

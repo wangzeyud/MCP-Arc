@@ -67,7 +67,7 @@ func (s *Server) handleRules(w http.ResponseWriter, r *http.Request) {
 		if rules == nil {
 			rules = []audit.MaskRule{}
 		}
-		writeJSON(w, http.StatusOK, map[string]interface{}{"rules": rules})
+		writeJSON(w, http.StatusOK, map[string]any{"rules": rules})
 	case http.MethodPost:
 		rule, err := decodeRule(r)
 		if err != nil {
@@ -123,7 +123,7 @@ func (s *Server) handleRuleByID(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]interface{}{"deleted": id})
+		writeJSON(w, http.StatusOK, map[string]any{"deleted": id})
 
 	default:
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "use GET, PUT or DELETE"})

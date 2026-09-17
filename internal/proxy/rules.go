@@ -30,6 +30,21 @@ func specsFromConfig(rules []config.MaskRule) []mask.Spec {
 	return out
 }
 
+// configSpecs merges config.yaml rules with any referenced presets into masking
+// specs. User rules come first so they win on any overlap with a preset.
+func (p *Proxy) configSpecs() []mask.Spec {
+	specs := specsFromConfig(p.opts.Config.Masking.Rules)
+	if len(p.opts.Config.Masking.Presets) == 0 {
+		return specs
+	}
+	presets, err := mask.PresetSpecs(p.opts.Config.Masking.Presets)
+	if err != nil {
+		log.Printf("warn: %v", err)
+		return specs
+	}
+	return append(specs, presets...)
+}
+
 func specOf(r audit.MaskRule) mask.Spec {
 	return mask.Spec{
 		Name:     r.Name,
@@ -44,7 +59,11 @@ func specOf(r audit.MaskRule) mask.Spec {
 // the database is used, so the console starts from what the operator already
 // wrote and can then take over from there.
 func (p *Proxy) seedConfigRules() {
-	if p.auditStore == nil || len(p.opts.Config.Masking.Rules) == 0 {
+	if p.auditStore == nil {
+		return
+	}
+	specs := p.configSpecs()
+	if len(specs) == 0 {
 		return
 	}
 	existing, err := p.auditStore.ListRules()
@@ -55,20 +74,20 @@ func (p *Proxy) seedConfigRules() {
 	if len(existing) > 0 {
 		return // already seeded; config no longer owns the rules
 	}
-	for _, r := range p.opts.Config.Masking.Rules {
-		if !r.IsEnabled() {
+	for _, s := range specs {
+		if !s.Enabled {
 			continue
 		}
 		rule := &audit.MaskRule{
-			Name:     r.Name,
-			Patterns: r.Patterns,
-			Fields:   r.Fields,
-			MaskChar: r.MaskChar,
+			Name:     s.Name,
+			Patterns: s.Patterns,
+			Fields:   s.Fields,
+			MaskChar: s.MaskChar,
 			Enabled:  true,
 			Source:   "config",
 		}
 		if err := p.auditStore.CreateRule(rule); err != nil {
-			log.Printf("warn: seed rule %q: %v", r.Name, err)
+			log.Printf("warn: seed rule %q: %v", s.Name, err)
 		}
 	}
 }
@@ -80,7 +99,7 @@ func (p *Proxy) reloadRules() error {
 		return nil
 	}
 	if p.auditStore == nil {
-		return p.masker.Update(specsFromConfig(p.opts.Config.Masking.Rules))
+		return p.masker.Update(p.configSpecs())
 	}
 	rules, err := p.auditStore.ListRules()
 	if err != nil {

@@ -84,7 +84,7 @@ func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Content-Disposition", `attachment; filename="mcp-arc-calls-`+stamp+`.json"`)
-	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+	_ = json.NewEncoder(w).Encode(map[string]any{
 		"exported_at": time.Now(),
 		"count":       len(rows),
 		"records":     rows,

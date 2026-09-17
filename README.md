@@ -3,8 +3,9 @@
 # MCP Arc
 
 A **lightweight MCP proxy** that sits between an MCP client and an MCP server.
-One command adds audit logging, parameter masking and call replay to any MCP
-call — without touching the protocol, and without locking you to a vendor.
+One command adds audit logging, parameter masking, call replay and per-client
+rate limiting to any MCP call — without touching the protocol, and without
+locking you to a vendor.
 
 ```
 MCP client  ──────▶  MCP Arc  ──────▶  MCP server
@@ -17,15 +18,19 @@ MCP client  ──────▶  MCP Arc  ──────▶  MCP server
 
 ## What it does
 
+MCP Arc does exactly four things, and nothing else:
+
 | | |
 |---|---|
 | **Parameter masking** | Redacts PII / secrets in `tools/call` arguments (and results) before anything is persisted. Regex patterns + sensitive field names, configured in YAML or edited at runtime. |
 | **Call audit** | Who (`client_id`), when, which tool, what params, what result, how long, success or error — persisted to SQLite (default) or PostgreSQL. |
 | **Replay** | Re-issue a recorded `tools/call` to the upstream verbatim, for debugging flaky tools and for compliance re-execution. |
+| **Rate limiting** | Per-`client_id` token-bucket QPS + daily quota, so a noisy client can't starve the upstream. |
 
-Plus the small stuff that makes it usable: per-`client_id` rate limiting (token
-bucket QPS + daily quota), runtime-editable masking rules (no restart), JSON /
-CSV export, and an embedded Vue3 console served by one binary.
+The single embedded Vue3 console is the **observability UI** for the four
+capabilities above (audit logs, masking rules, replay) — it is not a fifth
+feature. Masking rules are editable at runtime (hot-reloaded, no restart), and
+audit records can be exported as JSON / CSV.
 
 ## Design
 
@@ -62,7 +67,8 @@ Windows / macOS / Linux are on the roadmap for **v1.0**. Until then, use Docker
 
 ### C. Build from source (developers)
 
-Requires **Go 1.22+** and a C compiler (CGO) for the SQLite driver.
+Requires **Go 1.27**. The SQLite driver is pure-Go (`modernc.org/sqlite`), so
+**no C compiler (CGO) is needed**.
 
 ```bash
 # 1) build the embedded web console — its files live in web/, NOT the repo root
@@ -199,7 +205,7 @@ See `config.yaml`. Key sections:
 | `server.upstream` | upstream command + args written in config, instead of `--upstream` |
 | `transport` | `client` / `upstream` (`stdio`\|`sse`), `listen` (SSE bind addr), `upstream_url` |
 | `audit` | `enabled`, `driver: sqlite` (default) or `postgres`, `dsn` |
-| `masking` | `enabled` + `rules` (regex `patterns` and/or `fields`) |
+| `masking` | `enabled` + `rules` (regex `patterns` and/or `fields`) + optional `presets` (named template list) |
 | `llm` | optional LLM-assisted masking: `enabled`, `endpoint`, `api_key`, `model`, `timeout_ms`, `max_bytes`, `cache_ttl_seconds`, `apply_to_result` |
 | `rate_limit` | `enabled`, `qps`, `daily_quota` (per `client_id`) |
 | `admin` | `enabled`, `port`, `token` (Bearer token for the console) |
@@ -211,6 +217,23 @@ the rules from `config.yaml` are **seeded** in (`source: config`), and from then
 on the console owns them — create, edit, enable/disable and delete at runtime.
 Every write **hot-reloads** the masker, so the next tool call uses the new rules
 without a restart.
+
+### Preset templates
+
+Common PII patterns ship as named presets so you don't re-derive them. Enable
+them by listing names under `masking.presets` in `config.yaml`:
+
+| preset | matches | mask |
+|---|---|---|
+| `phone_cn` | mainland China mobile numbers | `[PHONE]` |
+| `ip` | IPv4 addresses | `[IP]` |
+| `bank_card_cn` | UnionPay cards (start with 62) | `[BANKCARD]` |
+| `passport` | passport numbers | `[PASSPORT]` |
+| `mac` | MAC addresses | `[MAC]` |
+
+They are seeded into the rules table like any config rule, so the console can
+still edit or disable them. Names, addresses and other free-text PII are
+deliberately excluded — use the LLM second pass for those.
 
 A rule needs a `name` plus at least one `pattern` or `field`; regexes are
 compile-checked on save, so a bad pattern is rejected instead of silently
@@ -283,13 +306,21 @@ curl -X POST -H "Authorization: Bearer change-me" -H "Content-Type: application/
 Replay rides the same id-rewrite / response-correlation machinery as a live
 call, so it works for stdio and SSE upstreams alike.
 
+## Changelog
+
+### v0.3 — stability & production readiness
+- **Preset masking templates** — built-in `phone_cn` / `ip` / `bank_card_cn` / `passport` / `mac` templates; reference them by name under `masking.presets`.
+- **Async, timeout-bounded audit writes** — audit logging is offloaded to a buffered queue + background worker with a per-insert wall-clock timeout, so a slow or hung database can never stall the request path (best-effort, fail-open).
+- **Upstream resilience** — automatic reconnect/restart on upstream crash or exit; on a failed audit write the client gets an explicit `-32002` error instead of a silent hang.
+- **Replay UI** — inspect and replay past `tools/call` invocations from the web console (Dashboard / Call Logs / Replay).
+- **Graceful shutdown** — on `SIGINT`/`SIGTERM` the proxy drains the buffered audit queue (bounded by `audit.shutdown_flush_timeout_ms`, default 5s) before closing the store, and fails in-flight requests with a clear `upstream disconnected` error instead of leaving clients hanging.
+
 ## Roadmap
 
 - **v0.1** ✅ stdio / SSE transports, audit (SQLite + PostgreSQL), masking, rate limit, console, replay.
 - **v0.2** ✅ LLM-assisted masking, rule CRUD in the console, JSON / CSV export.
-- **v0.3** (in progress) — stability and production readiness: config hot reload, graceful upstream exit, audit write degradation, alert webhooks, richer stats, more PII presets, 7×24 soak test.
-- **v1.0** — production ready: complete docs, one-command install (script / brew / `go install` / Docker), TLS for SSE.
-- **v2.0+** — multi-tenancy, policy engine, clustered deployment. No timeline.
+- **v0.3** ✅ stability and production readiness: preset masking templates, async/timeout-bounded audit writes, upstream reconnect, replay UI, graceful shutdown.
+- **v0.4** 📋 (planned) — stability / 7×24 soak testing (internal quality; no new features).
 
 ## License
 

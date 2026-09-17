@@ -33,14 +33,18 @@ type TransportConfig struct {
 }
 
 type AuditConfig struct {
-	Enabled bool   `yaml:"enabled"`
-	Driver  string `yaml:"driver"` // sqlite
-	DSN     string `yaml:"dsn"`    // ./mcp-arc.db
+	Enabled                bool   `yaml:"enabled"`
+	Driver                 string `yaml:"driver"`                    // sqlite | postgres | memory
+	DSN                    string `yaml:"dsn"`                       // ./mcp-arc.db
+	QueueSize              int    `yaml:"queue_size"`                // audit write buffer; 0 → default 1024
+	WriteTimeoutMs         int    `yaml:"write_timeout_ms"`          // per-insert wall-clock timeout; 0 → 2s
+	ShutdownFlushTimeoutMs int    `yaml:"shutdown_flush_timeout_ms"` // max time to drain the queue on shutdown; 0 → 5s
 }
 
 type MaskingConfig struct {
 	Enabled bool       `yaml:"enabled"`
 	Rules   []MaskRule `yaml:"rules"`
+	Presets []string   `yaml:"presets"` // names from the built-in preset library
 }
 
 type MaskRule struct {
@@ -87,9 +91,10 @@ type RateLimitConfig struct {
 }
 
 type AdminConfig struct {
-	Enabled bool   `yaml:"enabled"`
-	Port    int    `yaml:"port"`
-	Token   string `yaml:"token"`
+	Enabled     bool   `yaml:"enabled"`
+	Port        int    `yaml:"port"`
+	Token       string `yaml:"token"`
+	OpenBrowser bool   `yaml:"open_browser"` // auto-open the web console in the default browser on startup
 }
 
 func Load(path string) (*Config, error) {
@@ -117,6 +122,15 @@ func applyDefaults(c *Config) {
 	}
 	if c.Audit.DSN == "" {
 		c.Audit.DSN = "./mcp-arc.db"
+	}
+	if c.Audit.QueueSize <= 0 {
+		c.Audit.QueueSize = 1024
+	}
+	if c.Audit.WriteTimeoutMs <= 0 {
+		c.Audit.WriteTimeoutMs = 2000
+	}
+	if c.Audit.ShutdownFlushTimeoutMs <= 0 {
+		c.Audit.ShutdownFlushTimeoutMs = 5000
 	}
 	if c.Server.ClientID == "" {
 		if v := os.Getenv("MCP_ARC_CLIENT_ID"); v != "" {

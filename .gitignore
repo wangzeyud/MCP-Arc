@@ -1,5 +1,10 @@
 # build artifacts (anchored to repo root — a bare `mcp-arc` would also match cmd/mcp-arc/)
 /mcp-arc
+/mcp-arc.exe
+/mcp-arc-gui.exe
+
+# runtime logs
+*.log
 
 # runtime / data dirs (docker volume mount, local sqlite audit db)
 data/

@@ -100,7 +100,7 @@ Rules:
 - If nothing is sensitive, reply {"findings":[]}.`
 
 // Detect implements mask.Detector.
-func (c *Client) Detect(value map[string]interface{}) ([]mask.Finding, error) {
+func (c *Client) Detect(value map[string]any) ([]mask.Finding, error) {
 	if c == nil || len(value) == 0 {
 		return nil, nil
 	}
@@ -131,7 +131,7 @@ func (c *Client) Detect(value map[string]interface{}) ([]mask.Finding, error) {
 }
 
 func (c *Client) call(payload []byte) ([]mask.Finding, error) {
-	body, err := json.Marshal(map[string]interface{}{
+	body, err := json.Marshal(map[string]any{
 		"model":       c.cfg.Model,
 		"temperature": 0,
 		"messages": []map[string]string{

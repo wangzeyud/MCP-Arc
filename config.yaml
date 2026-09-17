@@ -1,11 +1,18 @@
 server:
   client_id: "default"
-  # upstream: ["node", "examples/echo-server/server.js"]   # 也可在此写死上游命令
+  # gateway mode: spawn the real MCP server as upstream (requires Node.js).
+  upstream: ["node", "examples/echo-server/server.js"]
+
+transport:
+  client: sse            # MCP clients connect to MCP Arc over SSE
+  listen: ":8081"
+  upstream: stdio        # MCP Arc talks to the upstream over stdio
 
 audit:
   enabled: true
-  driver: sqlite                         # 也支持 "postgres"（见 config.postgres.yaml）
+  driver: memory         # in-memory store: the GUI build is CGO_ENABLED=0, so sqlite (cgo) cannot load
   dsn: ./mcp-arc.db
+  shutdown_flush_timeout_ms: 5000        # 优雅关闭时排干审计队列的最长时间
 
 masking:
   enabled: true
@@ -29,6 +36,11 @@ masking:
     - name: sensitive_fields
       fields: [password, passwd, pwd, secret, token, apiKey, api_key, cvv, card_cvv]
       mask_char: "****"
+  # 预置脱敏模板（代码内建库，按名引用；不列则不启用）
+  presets:
+    - phone_cn
+    - ip
+    - bank_card_cn
 
 # 可选：LLM 辅助脱敏（第二遍补漏）。静态规则先跑，模型只负责抓漏网之鱼。
 # 失败 / 超时一律 fail-open：不影响 tool 调用，退回静态脱敏结果。
@@ -53,3 +65,4 @@ admin:
   enabled: true
   port: 8080
   token: "change-me"
+  open_browser: true   # auto-open the web console in the default browser on startup

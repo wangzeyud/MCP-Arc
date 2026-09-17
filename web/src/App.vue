@@ -1,6 +1,6 @@
 <template>
   <el-container style="height: 100vh">
-    <el-header style="display: flex; align-items: center">
+    <el-header style="display: flex; align-items: center; gap: 10px">
       <h2 style="margin: 0">MCP Arc Console</h2>
     </el-header>
     <el-container>

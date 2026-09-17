@@ -47,6 +47,19 @@ export async function fetchStats() {
   return data as Stats
 }
 
+export interface Status {
+  client_transport: string
+  sse_url: string
+  console_url: string
+  admin_port: number
+}
+
+/** Effective addresses (console URL + the SSE endpoint to paste into the MCP client). */
+export async function fetchStatus() {
+  const { data } = await api.get('/status')
+  return data as Status
+}
+
 export async function fetchReplay(callId: number) {
   const { data } = await api.post('/replay', { call_id: callId })
   return data

@@ -13,8 +13,10 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/signal"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/dodoyu-sama/mcp-arc/internal/admin"
@@ -28,12 +30,18 @@ import (
 type Options struct {
 	UpstreamCmd []string
 	Config      *config.Config
+	// SSEURL / ConsoleURL are the effective (possibly auto-adjusted) addresses
+	// surfaced in the console. SSEURL is empty when the client transport is not
+	// "sse".
+	SSEURL     string
+	ConsoleURL string
 }
 
 type Proxy struct {
 	opts        Options
-	auditStore  audit.Store // also holds the masking rules table
-	auditWrites bool        // audit.enabled: whether call records are persisted
+	auditStore  audit.Store            // also holds the masking rules table
+	auditWrites bool                   // audit.enabled: whether call records are persisted
+	auditCh     chan *audit.CallRecord // async write buffer; nil → synchronous insert
 	masker      *mask.Masker
 	limiter     *ratelimit.TokenBucketManager
 	clientID    string
@@ -41,9 +49,10 @@ type Proxy struct {
 	upstreamWriter  func([]byte) error
 	clientBroadcast func([]byte) error
 
-	mu      sync.Mutex
-	seq     int64
-	pending map[string]*pendingCall
+	mu         sync.Mutex
+	upstreamMu sync.RWMutex
+	seq        int64
+	pending    map[string]*pendingCall
 }
 
 func New(opts Options) *Proxy {
@@ -74,7 +83,7 @@ func New(opts Options) *Proxy {
 			p.seedConfigRules()
 			if err := p.reloadRules(); err != nil {
 				log.Printf("warn: rule load failed, using config rules: %v", err)
-				_ = m.Update(specsFromConfig(opts.Config.Masking.Rules))
+				_ = m.Update(p.configSpecs())
 			}
 			p.initDetector(m)
 		}
@@ -90,29 +99,49 @@ func New(opts Options) *Proxy {
 
 // Run wires up the client and upstream transports and pumps messages between
 // them, applying the interception chain (rate limit, mask, audit) on the way.
+// It blocks until the client transport closes or a SIGINT/SIGTERM is received.
 func (p *Proxy) Run() error {
-	ctx, cancel := context.WithCancel(context.Background())
+	sigCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	return p.run(sigCtx)
+}
+
+// run is the shared implementation behind Run.
+func (p *Proxy) run(parent context.Context) error {
+	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
 
-	// --- upstream transport ---
-	var upstream transport.UpstreamTransporter
-	var err error
+	// Audit writes are offloaded to a buffered channel + background worker so a
+	// slow or hung database can never stall the response path.
+	var auditDone chan struct{}
+	if p.auditStore != nil && p.auditWrites {
+		p.auditCh = make(chan *audit.CallRecord, p.auditQueueSize())
+		auditDone = make(chan struct{})
+		go p.auditWorker(ctx, auditDone)
+	}
+
+	// --- upstream transport factory ---
+	// The upstream may die at any time; upstreamSupervisor recreates it on every
+	// failure, so we keep a factory rather than a single live connection.
+	var upstreamFactory func() (transport.UpstreamTransporter, error)
 	switch p.opts.Config.Transport.Upstream {
 	case "sse":
 		if p.opts.Config.Transport.UpstreamURL == "" {
 			return errors.New("transport.upstream_url is required when upstream = sse")
 		}
-		upstream = transport.NewSSEUpstream(p.opts.Config.Transport.UpstreamURL)
+		url := p.opts.Config.Transport.UpstreamURL
+		upstreamFactory = func() (transport.UpstreamTransporter, error) {
+			return transport.NewSSEUpstream(url), nil
+		}
 	default: // stdio
 		if len(p.opts.UpstreamCmd) == 0 {
 			return errors.New("no upstream command provided")
 		}
-		upstream, err = transport.NewStdioUpstream(p.opts.UpstreamCmd)
-		if err != nil {
-			return err
+		cmd := p.opts.UpstreamCmd
+		upstreamFactory = func() (transport.UpstreamTransporter, error) {
+			return transport.NewStdioUpstream(cmd)
 		}
 	}
-	p.upstreamWriter = upstream.Write
 
 	// --- client transport ---
 	var client transport.ClientTransporter
@@ -128,37 +157,29 @@ func (p *Proxy) Run() error {
 	if sse, ok := client.(*transport.SSEServer); ok {
 		p.clientBroadcast = sse.Broadcast
 	} else {
-		p.clientBroadcast = func(b []byte) error {
-			os.Stdout.Write(b)
-			_, e := os.Stdout.Write([]byte{'\n'})
-			return e
-		}
+		p.clientBroadcast = transport.StdioClient{}.Broadcast
 	}
 
 	if p.opts.Config.Admin.Enabled {
 		go func() {
 			srv := admin.New(p.auditStore, p.opts.Config.Admin.Token, p, p)
+			srv.Status = admin.Status{
+				ClientTransport: p.opts.Config.Transport.Client,
+				SSEURL:          p.opts.SSEURL,
+				ConsoleURL:      p.opts.ConsoleURL,
+				AdminPort:       p.opts.Config.Admin.Port,
+			}
 			if e := srv.Start(p.opts.Config.Admin.Port); e != nil {
 				log.Printf("warn: admin server stopped: %v", e)
 			}
 		}()
 	}
 
-	errCh := make(chan error, 2)
-	go func() {
-		if e := upstream.Run(ctx, func(raw []byte) {
-			if err := p.processUpstreamMessage(raw); err != nil {
-				if errors.Is(err, context.Canceled) {
-					return // client disconnected; nothing to deliver, not an error
-				}
-				log.Printf("warn: upstream message: %v", err)
-			}
-		}); e != nil {
-			errCh <- e
-		} else {
-			errCh <- fmt.Errorf("upstream closed")
-		}
-	}()
+	// Keep the upstream alive: reconnect/restart it on any failure instead of
+	// taking the whole proxy down with it.
+	go p.upstreamSupervisor(ctx, upstreamFactory)
+
+	errCh := make(chan error, 1)
 	go func() {
 		if e := client.Run(ctx, func(raw []byte, respond func([]byte) error) {
 			p.handleClientMessage(raw, respond)
@@ -174,11 +195,30 @@ func (p *Proxy) Run() error {
 	// cannot grow p.pending without bound.
 	go p.sweepPending(ctx)
 
-	err = <-errCh
-	log.Printf("mcp-arc: shutting down (%v)", err)
+	var err error
+	select {
+	case err = <-errCh:
+		log.Printf("mcp-arc: stopping (client transport: %v)", err)
+	case <-ctx.Done():
+		log.Printf("mcp-arc: stopping (signal received)")
+	}
 	cancel()
-	_ = upstream.Close()
+	// Fail any in-flight requests up front so connected clients get a clear error
+	// instead of hanging until their own timeout while we tear the proxy down.
+	p.failPendingUpstreamDown()
 	_ = client.Close()
+	// Flush the audit queue so buffered records are not lost on shutdown. The
+	// worker drains under a bounded deadline; we wait for it (with our own
+	// timeout guard) before closing the store so nothing is dropped mid-write.
+	if auditDone != nil {
+		waitAudit := make(chan struct{})
+		go func() { <-auditDone; close(waitAudit) }()
+		select {
+		case <-waitAudit:
+		case <-time.After(p.auditShutdownTimeout()):
+			log.Printf("warn: audit flush timed out; closing store anyway")
+		}
+	}
 	if p.auditStore != nil {
 		_ = p.auditStore.Close()
 	}
@@ -190,7 +230,19 @@ func (p *Proxy) handleClientMessage(raw []byte, respond func([]byte) error) {
 	if synthetic != nil {
 		_ = respond(synthetic)
 	} else if forward != nil {
-		_ = p.upstreamWriter(forward)
+		if err := p.writeUpstream(forward); err != nil {
+			log.Printf("warn: upstream write failed: %v", err)
+			// Tell the client exactly what went wrong instead of leaving it to
+			// hang until the 5-minute sweep.
+			if id, ok := extractMsgID(raw); ok {
+				_ = respond(jsonRPCError(id, upstreamWriteFailedCode, "upstream write failed: "+err.Error()))
+			}
+			// The request never left the proxy, so drop its correlation entry
+			// rather than let it linger for the sweep and double-respond later.
+			if key, ok := pendingKey(forward); ok {
+				p.dropPending(key)
+			}
+		}
 	}
 }
 
@@ -201,24 +253,24 @@ func (p *Proxy) handleClientMessage(raw []byte, respond func([]byte) error) {
 // from MCP semantics: it only knows the "tools/call" method name and the params
 // shape — it does not parse or depend on the protocol internals.
 func (p *Proxy) Replay(ctx context.Context, toolName string, rawParams []byte) ([]byte, error) {
-	if p.upstreamWriter == nil {
+	if p.getUpstreamWriter() == nil {
 		return nil, errors.New("replay unavailable: upstream transport not connected")
 	}
 	// Numbers stay in their literal form so a replayed call carries byte-identical
 	// arguments to the original (see decodeJSONObject).
 	args, err := decodeJSONObject(rawParams)
 	if err != nil || args == nil {
-		args = map[string]interface{}{}
+		args = map[string]any{}
 	}
 	upID := fmt.Sprintf("gw-%d", atomic.AddInt64(&p.seq, 1))
 	ch := make(chan []byte, 1)
 	now := time.Now()
 	pc := &pendingCall{
-		toolName: toolName,
-		start:    now,
-		deadline: now.Add(pendingTTL),
-		respond:  func(b []byte) error { ch <- b; return nil },
-		origID:   upID,
+		toolName:  toolName,
+		start:     now,
+		deadline:  now.Add(pendingTTL),
+		respond:   func(b []byte) error { ch <- b; return nil },
+		origIDRaw: json.RawMessage(fmt.Sprintf("%q", upID)),
 	}
 	if p.masker != nil {
 		if m, err := p.masker.Mask(args); err == nil && m != nil {
@@ -239,7 +291,7 @@ func (p *Proxy) Replay(ctx context.Context, toolName string, rawParams []byte) (
 	if err != nil {
 		return nil, err
 	}
-	if err := p.upstreamWriter(b); err != nil {
+	if err := p.writeUpstream(b); err != nil {
 		return nil, err
 	}
 	select {

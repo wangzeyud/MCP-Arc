@@ -75,15 +75,15 @@ func TestNewRequiresEndpoint(t *testing.T) {
 }
 
 // mockServer answers like an OpenAI-compatible endpoint and records what it saw.
-func mockServer(t *testing.T, status int, body string) (*httptest.Server, *int32, func(int) map[string]interface{}) {
+func mockServer(t *testing.T, status int, body string) (*httptest.Server, *int32, func(int) map[string]any) {
 	t.Helper()
 	var hits int32
-	var last map[string]interface{}
+	var last map[string]any
 	var mu = make(chan struct{}, 1)
 	mu <- struct{}{}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&hits, 1)
-		var req map[string]interface{}
+		var req map[string]any
 		_ = json.NewDecoder(r.Body).Decode(&req)
 		<-mu
 		last = req
@@ -92,7 +92,7 @@ func mockServer(t *testing.T, status int, body string) (*httptest.Server, *int32
 		w.WriteHeader(status)
 		_, _ = w.Write([]byte(body))
 	}))
-	get := func(int) map[string]interface{} {
+	get := func(int) map[string]any {
 		<-mu
 		defer func() { mu <- struct{}{} }()
 		return last
@@ -101,8 +101,8 @@ func mockServer(t *testing.T, status int, body string) (*httptest.Server, *int32
 }
 
 func chatResponse(content string) string {
-	b, _ := json.Marshal(map[string]interface{}{
-		"choices": []map[string]interface{}{{"message": map[string]string{"content": content}}},
+	b, _ := json.Marshal(map[string]any{
+		"choices": []map[string]any{{"message": map[string]string{"content": content}}},
 	})
 	return string(b)
 }
@@ -116,7 +116,7 @@ func TestDetectCachesIdenticalPayloads(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, err := c.Detect(map[string]interface{}{"note": "hi"})
+	got, err := c.Detect(map[string]any{"note": "hi"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,14 +128,14 @@ func TestDetectCachesIdenticalPayloads(t *testing.T) {
 		t.Errorf("model not forwarded: %#v", req["model"])
 	}
 
-	if _, err := c.Detect(map[string]interface{}{"note": "hi"}); err != nil {
+	if _, err := c.Detect(map[string]any{"note": "hi"}); err != nil {
 		t.Fatal(err)
 	}
 	if n := atomic.LoadInt32(hits); n != 1 {
 		t.Errorf("identical payload should hit the cache, endpoint called %d times", n)
 	}
 
-	if _, err := c.Detect(map[string]interface{}{"note": "different"}); err != nil {
+	if _, err := c.Detect(map[string]any{"note": "different"}); err != nil {
 		t.Fatal(err)
 	}
 	if n := atomic.LoadInt32(hits); n != 2 {
@@ -151,7 +151,7 @@ func TestDetectSkipsOversizedPayloads(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	big := map[string]interface{}{"blob": strings.Repeat("x", 128)}
+	big := map[string]any{"blob": strings.Repeat("x", 128)}
 	got, err := c.Detect(big)
 	if err != nil {
 		t.Fatalf("oversized payload must fail open, got %v", err)
@@ -173,12 +173,12 @@ func TestDetectFailsOpenThenOpensBreaker(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := c.Detect(map[string]interface{}{"a": "b"}); err == nil {
+	if _, err := c.Detect(map[string]any{"a": "b"}); err == nil {
 		t.Fatal("expected an error from a failing endpoint")
 	}
 
 	// The breaker should now absorb subsequent calls instead of adding latency.
-	got, err := c.Detect(map[string]interface{}{"a": "b"})
+	got, err := c.Detect(map[string]any{"a": "b"})
 	if err != nil {
 		t.Errorf("breaker should short-circuit without an error, got %v", err)
 	}

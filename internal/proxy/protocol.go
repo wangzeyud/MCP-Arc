@@ -22,29 +22,29 @@ const MethodToolsCall = "tools/call"
 // toolCall reports whether msg is a tools/call request and, if so, extracts the
 // tool name and its arguments object. It never fails on unexpected shapes: an
 // unrecognised message simply is not a tool call and is forwarded untouched.
-func toolCall(msg map[string]interface{}) (name string, args map[string]interface{}, ok bool) {
+func toolCall(msg map[string]any) (name string, args map[string]any, ok bool) {
 	if m, _ := msg["method"].(string); m != MethodToolsCall {
 		return "", nil, false
 	}
-	params, _ := msg["params"].(map[string]interface{})
+	params, _ := msg["params"].(map[string]any)
 	if params == nil {
 		return "", nil, true
 	}
 	name, _ = params["name"].(string)
-	args, _ = params["arguments"].(map[string]interface{})
+	args, _ = params["arguments"].(map[string]any)
 	return name, args, true
 }
 
 // newToolCallRequest builds a tools/call JSON-RPC request carrying the given id.
 // Used by replay so it reuses exactly the same shape as a live client call.
-func newToolCallRequest(id interface{}, toolName string, args map[string]interface{}) ([]byte, error) {
+func newToolCallRequest(id any, toolName string, args map[string]any) ([]byte, error) {
 	if args == nil {
-		args = map[string]interface{}{}
+		args = map[string]any{}
 	}
-	return json.Marshal(map[string]interface{}{
+	return json.Marshal(map[string]any{
 		"jsonrpc": "2.0",
 		"id":      id,
 		"method":  MethodToolsCall,
-		"params":  map[string]interface{}{"name": toolName, "arguments": args},
+		"params":  map[string]any{"name": toolName, "arguments": args},
 	})
 }

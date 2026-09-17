@@ -34,7 +34,7 @@ type pendingCall struct {
 	start        time.Time
 	deadline     time.Time
 	respond      func([]byte) error
-	origID       interface{}
+	origIDRaw    json.RawMessage
 }
 
 // decodeJSONObject decodes raw into a generic map, keeping every number in its
@@ -48,10 +48,10 @@ type pendingCall struct {
 //
 // It rejects anything that is not exactly one JSON object, so malformed or
 // batched payloads keep taking the pass-through path.
-func decodeJSONObject(raw []byte) (map[string]interface{}, error) {
+func decodeJSONObject(raw []byte) (map[string]any, error) {
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.UseNumber()
-	var msg map[string]interface{}
+	var msg map[string]any
 	if err := dec.Decode(&msg); err != nil {
 		return nil, err
 	}
@@ -83,10 +83,10 @@ func (p *Proxy) processClientMessage(raw []byte, respond func([]byte) error) (fo
 
 	// rate limit only tool calls
 	if isToolCall && !p.limiter.Allow(p.clientID) {
-		resp := map[string]interface{}{
+		resp := map[string]any{
 			"jsonrpc": "2.0",
 			"id":      id,
-			"error":   map[string]interface{}{"code": -32000, "message": "rate limit exceeded"},
+			"error":   map[string]any{"code": -32000, "message": "rate limit exceeded"},
 		}
 		b, _ := json.Marshal(resp)
 		return nil, b
@@ -95,11 +95,12 @@ func (p *Proxy) processClientMessage(raw []byte, respond func([]byte) error) (fo
 	// gateway-unique id for correlation across concurrent client sessions
 	upID := fmt.Sprintf("gw-%d", atomic.AddInt64(&p.seq, 1))
 	now := time.Now()
-	pc := &pendingCall{respond: respond, origID: id, start: now, deadline: now.Add(pendingTTL)}
+	origIDRaw, _ := json.Marshal(id)
+	pc := &pendingCall{respond: respond, origIDRaw: origIDRaw, start: now, deadline: now.Add(pendingTTL)}
 
 	if isToolCall {
 		if arguments == nil {
-			arguments = map[string]interface{}{}
+			arguments = map[string]any{}
 		}
 		pc.toolName = toolName
 		rawParams, _ := json.Marshal(arguments)
@@ -147,14 +148,14 @@ func (p *Proxy) processUpstreamMessage(raw []byte) error {
 	p.mu.Unlock()
 
 	// restore the original client id
-	msg["id"] = pc.origID
+	msg["id"] = pc.origIDRaw
 	outRaw, _ := json.Marshal(msg)
 
 	if pc.toolName != "" {
 		latency := time.Since(pc.start).Milliseconds()
 		errMsg := ""
-		var result interface{}
-		if e, ok := msg["error"].(map[string]interface{}); ok {
+		var result any
+		if e, ok := msg["error"].(map[string]any); ok {
 			b, _ := json.Marshal(e)
 			errMsg = string(b)
 		} else {
@@ -167,7 +168,7 @@ func (p *Proxy) processUpstreamMessage(raw []byte) error {
 		resultBytes := []byte("null")
 		if result != nil {
 			if p.masker != nil {
-				if rm, ok := result.(map[string]interface{}); ok {
+				if rm, ok := result.(map[string]any); ok {
 					if masked, err := p.masker.MaskResult(rm); err == nil && masked != nil {
 						result = masked
 					}
@@ -186,10 +187,8 @@ func (p *Proxy) processUpstreamMessage(raw []byte) error {
 			LatencyMs: latency,
 			Timestamp: time.Now(),
 		}
-		if p.auditWrites && p.auditStore != nil {
-			if err := p.auditStore.Insert(rec); err != nil {
-				log.Printf("warn: audit insert failed: %v", err)
-			}
+		if p.auditWrites {
+			p.enqueueAudit(rec)
 		}
 	}
 
@@ -231,10 +230,10 @@ func (p *Proxy) reapPending(now time.Time) {
 		if pc.respond == nil {
 			continue
 		}
-		resp, err := json.Marshal(map[string]interface{}{
+		resp, err := json.Marshal(map[string]any{
 			"jsonrpc": "2.0",
-			"id":      pc.origID,
-			"error": map[string]interface{}{
+			"id":      pc.origIDRaw,
+			"error": map[string]any{
 				"code":    upstreamTimeoutCode,
 				"message": "upstream timeout",
 			},

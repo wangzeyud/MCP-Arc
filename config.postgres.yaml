@@ -6,6 +6,7 @@ audit:
   enabled: true
   driver: postgres
   dsn: "postgres://mcp_arc:mcp_arc@localhost:5432/mcp_arc?sslmode=disable"
+  shutdown_flush_timeout_ms: 5000        # 优雅关闭时排干审计队列的最长时间
   # 建库示例：createdb mcp_arc  或让 MCP Arc 在 migrate() 里自动建表
 
 masking:
@@ -30,6 +31,11 @@ masking:
     - name: sensitive_fields
       fields: [password, passwd, pwd, secret, token, apiKey, api_key, cvv, card_cvv]
       mask_char: "****"
+  # 预置脱敏模板（代码内建库，按名引用；不列则不启用）
+  presets:
+    - phone_cn
+    - ip
+    - bank_card_cn
 
 rate_limit:
   enabled: true    # 按 client_id 限流（令牌桶 QPS + 日配额）

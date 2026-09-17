@@ -3,13 +3,18 @@ package proxy
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/dodoyu-sama/mcp-arc/internal/audit"
+	"github.com/dodoyu-sama/mcp-arc/internal/config"
 	"github.com/dodoyu-sama/mcp-arc/internal/mask"
 	"github.com/dodoyu-sama/mcp-arc/internal/ratelimit"
+	"github.com/dodoyu-sama/mcp-arc/internal/transport"
 )
 
 // capturingStore records audit inserts so the interception chain can be
@@ -57,9 +62,9 @@ func numberAt(t *testing.T, raw []byte, keys ...string) string {
 	if err != nil {
 		t.Fatalf("decode %s: %v", raw, err)
 	}
-	var cur interface{} = m
+	var cur any = m
 	for _, k := range keys {
-		obj, ok := cur.(map[string]interface{})
+		obj, ok := cur.(map[string]any)
 		if !ok {
 			t.Fatalf("expected an object at %q in %s", k, raw)
 		}
@@ -78,9 +83,9 @@ func stringAt(t *testing.T, raw []byte, keys ...string) string {
 	if err != nil {
 		t.Fatalf("decode %s: %v", raw, err)
 	}
-	var cur interface{} = m
+	var cur any = m
 	for _, k := range keys {
-		obj, ok := cur.(map[string]interface{})
+		obj, ok := cur.(map[string]any)
 		if !ok {
 			t.Fatalf("expected an object at %q in %s", k, raw)
 		}
@@ -431,5 +436,168 @@ func TestSweepPendingStopsWithContext(t *testing.T) {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("sweepPending did not return after the context was cancelled")
+	}
+}
+
+// slowInsertStore makes only its first Insert block (200ms), then returns fast —
+// used to prove the audit worker doesn't stall on a slow write. The "first" call
+// is counted atomically at entry, before the sleep, so a later call is never
+// mistaken for the slow one.
+type slowInsertStore struct {
+	fakeRuleStore
+	mu      sync.Mutex
+	records []*audit.CallRecord
+	calls   int64
+}
+
+func (s *slowInsertStore) Insert(r *audit.CallRecord) error {
+	if atomic.AddInt64(&s.calls, 1) == 1 {
+		time.Sleep(200 * time.Millisecond)
+	}
+	s.mu.Lock()
+	s.records = append(s.records, r)
+	s.mu.Unlock()
+	return nil
+}
+
+// Audit writes must not block the response path, and a slow write must not stall
+// the worker from processing the next one.
+func TestAuditWriteOffloadedAndNonBlocking(t *testing.T) {
+	store := &slowInsertStore{}
+	p := &Proxy{
+		opts:            Options{Config: &config.Config{}},
+		pending:         map[string]*pendingCall{},
+		limiter:         ratelimit.NewTokenBucketManager(0, 0, false),
+		auditWrites:     true,
+		auditStore:      store,
+		auditCh:         make(chan *audit.CallRecord, 8),
+		clientID:        "test-client",
+		clientBroadcast: func([]byte) error { return nil },
+	}
+	p.opts.Config.Audit.WriteTimeoutMs = 50 // force a quick timeout on the slow write
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go p.auditWorker(ctx, make(chan struct{}))
+	defer cancel()
+
+	noOp := func([]byte) error { return nil }
+
+	// First call: slow insert. The response path must return immediately.
+	p.processClientMessage([]byte(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"slow","arguments":{}}}`), noOp)
+	start := time.Now()
+	if err := p.processUpstreamMessage([]byte(`{"jsonrpc":"2.0","id":"gw-1","result":{}}`)); err != nil {
+		t.Fatal(err)
+	}
+	if elapsed := time.Since(start); elapsed > 100*time.Millisecond {
+		t.Fatalf("hot path blocked for %s; expected it to enqueue and return immediately", elapsed)
+	}
+
+	// Second call: fast insert. It must be audited even while the first is still
+	// sleeping — proving the worker moved past the slow one.
+	p.processClientMessage([]byte(`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"fast","arguments":{}}}`), noOp)
+	if err := p.processUpstreamMessage([]byte(`{"jsonrpc":"2.0","id":"gw-2","result":{}}`)); err != nil {
+		t.Fatal(err)
+	}
+
+	// Wait past the slow insert (200ms); the fast one should already be recorded.
+	time.Sleep(120 * time.Millisecond)
+	store.mu.Lock()
+	sawFast := false
+	for _, r := range store.records {
+		if r.ToolName == "fast" {
+			sawFast = true
+		}
+	}
+	store.mu.Unlock()
+	if !sawFast {
+		t.Fatalf("fast call was not audited while a slow write was pending; records=%d", len(store.records))
+	}
+}
+
+// fakeUpstream is a transport.UpstreamTransporter whose Run returns quickly (to
+// simulate a crash) and whose Write can be made to fail, for exercising the
+// supervisor reconnect loop and the write-failure error path.
+type fakeUpstream struct {
+	mu       sync.Mutex
+	runs     int
+	writeErr error
+	runErr   error
+}
+
+func (f *fakeUpstream) Run(ctx context.Context, onMessage func([]byte)) error {
+	f.mu.Lock()
+	f.runs++
+	f.mu.Unlock()
+	select {
+	case <-time.After(20 * time.Millisecond):
+	case <-ctx.Done():
+	}
+	return f.runErr
+}
+
+func (f *fakeUpstream) Write(raw []byte) error { return f.writeErr }
+func (f *fakeUpstream) Close() error           { return nil }
+
+// The supervisor must reconnect the upstream after it dies, rather than giving up.
+func TestUpstreamSupervisorReconnects(t *testing.T) {
+	p := &Proxy{pending: map[string]*pendingCall{}}
+	f := &fakeUpstream{}
+	factory := func() (transport.UpstreamTransporter, error) { return f, nil }
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go p.upstreamSupervisor(ctx, factory)
+
+	time.Sleep(1200 * time.Millisecond)
+	f.mu.Lock()
+	runs := f.runs
+	f.mu.Unlock()
+
+	if runs < 2 {
+		t.Fatalf("expected at least 2 upstream (re)connects, got %d", runs)
+	}
+}
+
+// A failed forward to the upstream must surface a clear JSON-RPC error to the
+// client (with the original request id), not be silently dropped.
+func TestClientGetsClearErrorOnUpstreamWriteFailure(t *testing.T) {
+	p := &Proxy{
+		pending:     map[string]*pendingCall{},
+		limiter:     ratelimit.NewTokenBucketManager(0, 0, false),
+		auditWrites: false,
+	}
+	p.setUpstreamWriter(func(b []byte) error { return errors.New("connection refused") })
+
+	var got []byte
+	respond := func(b []byte) error { got = b; return nil }
+	raw := `{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"x","arguments":{}}}`
+	p.handleClientMessage([]byte(raw), respond)
+
+	if got == nil {
+		t.Fatal("expected a client error response when the upstream write fails")
+	}
+	var r struct {
+		ID    int `json:"id"`
+		Error struct {
+			Code    int    `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(got, &r); err != nil {
+		t.Fatal(err)
+	}
+	if r.ID != 7 {
+		t.Fatalf("error response id = %d, want 7 (raw=%s)", r.ID, got)
+	}
+	if r.Error.Code != upstreamWriteFailedCode {
+		t.Fatalf("error code = %d, want %d (raw=%s)", r.Error.Code, upstreamWriteFailedCode, got)
+	}
+
+	// The failed request never left the proxy, so its pending entry is dropped.
+	p.mu.Lock()
+	n := len(p.pending)
+	p.mu.Unlock()
+	if n != 0 {
+		t.Fatalf("expected pending to be empty after a failed write, got %d", n)
 	}
 }

@@ -9,7 +9,7 @@ transport:
 
 audit:
   enabled: true
-  driver: sqlite       # dev config uses sqlite so it runs without Postgres
+  driver: memory       # in-memory store: no CGO/sqlite needed, perfect for a local demo (data is lost on exit)
   dsn: ./mcp-arc-dev.db
 
 masking:
@@ -54,3 +54,4 @@ admin:
   enabled: true
   port: 8080
   token: "change-me"
+  open_browser: true   # auto-open the web console in the default browser on startup

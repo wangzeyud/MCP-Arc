@@ -4,7 +4,11 @@ import (
 	"database/sql"
 	"fmt"
 
-	_ "github.com/mattn/go-sqlite3"
+	// modernc.org/sqlite is a pure-Go SQLite driver (no cgo), so the sidecar
+	// builds and runs with CGO_ENABLED=0 — keeping audit/replay persistence
+	// working in a single portable binary. It registers the "sqlite3" driver
+	// name, so sql.Open below is unchanged.
+	_ "modernc.org/sqlite"
 )
 
 // compile-time check: both backends satisfy the full Store contract.
@@ -83,7 +87,7 @@ func (s *SQLiteStore) Insert(r *CallRecord) error {
 func (s *SQLiteStore) Query(opts QueryOpts) ([]CallRecord, error) {
 	query := `SELECT id, client_id, tool_name, params, raw_params, raw_result, result, error_msg, latency_ms, timestamp
 	          FROM calls WHERE 1=1`
-	var args []interface{}
+	var args []any
 	if opts.ClientID != "" {
 		query += " AND client_id = ?"
 		args = append(args, opts.ClientID)
@@ -144,7 +148,7 @@ func (s *SQLiteStore) Stats(opts StatsOpts) (*Stats, error) {
 	                 COALESCE(SUM(CASE WHEN error_msg != '' THEN 1 ELSE 0 END), 0),
 	                 COALESCE(AVG(latency_ms), 0)
 	          FROM calls WHERE 1=1`
-	var args []interface{}
+	var args []any
 	if !opts.Since.IsZero() {
 		query += " AND timestamp >= ?"
 		args = append(args, opts.Since)

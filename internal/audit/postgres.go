@@ -87,9 +87,9 @@ func (s *PostgresStore) Insert(r *CallRecord) error {
 func (s *PostgresStore) Query(opts QueryOpts) ([]CallRecord, error) {
 	query := `SELECT id, client_id, tool_name, params, raw_params, raw_result, result, error_msg, latency_ms, timestamp
 	          FROM calls WHERE 1=1`
-	var args []interface{}
+	var args []any
 	n := 0
-	add := func(cond string, val interface{}) {
+	add := func(cond string, val any) {
 		n++
 		query += " " + strings.Replace(cond, "?", fmt.Sprintf("$%d", n), 1)
 		args = append(args, val)
@@ -150,9 +150,9 @@ func (s *PostgresStore) Stats(opts StatsOpts) (*Stats, error) {
 	                 COALESCE(SUM(CASE WHEN error_msg != '' THEN 1 ELSE 0 END), 0),
 	                 COALESCE(AVG(latency_ms), 0)
 	          FROM calls WHERE 1=1`
-	var args []interface{}
+	var args []any
 	n := 0
-	add := func(cond string, val interface{}) {
+	add := func(cond string, val any) {
 		n++
 		query += " " + strings.Replace(cond, "?", fmt.Sprintf("$%d", n), 1)
 		args = append(args, val)

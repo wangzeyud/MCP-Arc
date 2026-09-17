@@ -3,7 +3,7 @@
 # MCP Arc
 
 一个**轻量的 MCP Proxy**，位于 MCP client 与 MCP server 之间。
-一行命令，为任意 MCP 调用加上审计日志、参数脱敏和调用回放——不侵入协议，不绑定厂商。
+一行命令，为任意 MCP 调用加上审计日志、参数脱敏、调用回放与限流——不侵入协议，不绑定厂商。
 
 ```
 MCP client  ──────▶  MCP Arc  ──────▶  MCP server
@@ -16,14 +16,16 @@ MCP client  ──────▶  MCP Arc  ──────▶  MCP server
 
 ## 核心功能
 
+MCP Arc 只做四件事，不多也不少：
+
 | | |
 |---|---|
 | **参数脱敏** | 自动识别并遮蔽 `tools/call` 参数（与返回）里的 PII / 密钥，再落库。正则 + 敏感字段名，YAML 里配，或运行时改。 |
 | **调用审计** | 谁（`client_id`）、何时、调了哪个 tool、传了什么参数、返回了什么、耗时多少、成功还是失败——落 SQLite（默认）或 PostgreSQL。 |
 | **回放** | 把记录过的一次 `tools/call` 原样重新发往上游，用于调试不稳定的 tool，以及合规性的重新执行。 |
+| **限流** | 按 `client_id` 的令牌桶 QPS + 日配额，避免某个客户端把上游打爆。 |
 
-外加让它真正能用的小事：按 `client_id` 的限流（令牌桶 QPS + 日配额）、运行时可改的
-脱敏规则（改完即生效，无需重启）、JSON / CSV 导出，以及编译进单个二进制的 Vue3 控制台。
+编译进单个二进制的 Vue3 控制台，只是上面四项能力的**观测 UI**（审计日志、脱敏规则、回放），不是第五个功能。脱敏规则可运行时修改（热加载、无需重启），审计记录支持 JSON / CSV 导出。
 
 ## 设计
 
@@ -57,7 +59,7 @@ docker compose --profile postgres up --build    # PostgreSQL 后端
 
 ### C. 从源码构建（开发者）
 
-需要 **Go 1.22+** 以及用于 SQLite 驱动的 C 编译器（CGO）。
+需要 **Go 1.27**。SQLite 驱动是纯 Go 实现（`modernc.org/sqlite`），**不需要 C 编译器（CGO）**。
 
 ```bash
 # 1) 构建内嵌的 Web 控制台——前端代码在 web/，不在仓库根目录
@@ -190,7 +192,7 @@ server:
 | `server.upstream` | 写在配置里、替代 `--upstream` 的命令 + 参数 |
 | `transport` | `client` / `upstream`（`stdio`\|`sse`）、`listen`（SSE 监听地址）、`upstream_url` |
 | `audit` | `enabled`、`driver: sqlite`（默认）或 `postgres`、`dsn` |
-| `masking` | `enabled` + `rules`（正则 `patterns` 和 / 或 `fields`） |
+| `masking` | `enabled` + `rules`（正则 `patterns` 和 / 或 `fields`）+ 可选 `presets`（命名模板列表） |
 | `llm` | 可选的 LLM 辅助脱敏：`enabled`、`endpoint`、`api_key`、`model`、`timeout_ms`、`max_bytes`、`cache_ttl_seconds`、`apply_to_result` |
 | `rate_limit` | `enabled`、`qps`、`daily_quota`（按 client_id） |
 | `admin` | `enabled`、`port`、`token`（控制台的 Bearer Token） |
@@ -200,6 +202,22 @@ server:
 规则存在库里（`mask_rules` 表），不再只活在 YAML 中：首次启动时 `config.yaml`
 里的规则会被**种子化**写入表中（`source: config`），之后规则归控制台管——可新建、
 编辑、启停、删除，**每次写入都会热加载**，下一条 tool 调用就用新规则，不用重启。
+
+### 预置脱敏模板
+
+常见的 PII 模式已作为命名模板内置，省得你自己重写正则。在 `config.yaml` 的
+`masking.presets` 里列出名字即可启用：
+
+| 模板 | 匹配 | 脱敏为 |
+|---|---|---|
+| `phone_cn` | 中国大陆手机号 | `[PHONE]` |
+| `ip` | IPv4 地址 | `[IP]` |
+| `bank_card_cn` | 银联卡（以 62 开头） | `[BANKCARD]` |
+| `passport` | 护照号 | `[PASSPORT]` |
+| `mac` | MAC 地址 | `[MAC]` |
+
+它们会像普通配置规则一样种子化进规则表，控制台仍可编辑或停用。姓名、住址等
+自由文本 PII 故意不内置正则（误伤太大），这类请用 LLM 辅助脱敏第二遍。
 
 一条规则必须有 `name`，且至少有 `pattern` 或 `field` 之一；正则在保存时会做编译校验，
 写错的正则会被当场拒绝，而不是悄悄让脱敏失效。
@@ -267,13 +285,21 @@ curl -X POST -H "Authorization: Bearer change-me" -H "Content-Type: application/
 
 回放复用和实时调用相同的 id 改写 / 响应关联机制，因此 stdio 与 SSE 上游都适用。
 
+## 更新日志
+
+### v0.3 —— 稳定性与生产可用性
+- **预置脱敏模板** —— 内置 `phone_cn` / `ip` / `bank_card_cn` / `passport` / `mac` 五个模板；在 `masking.presets` 按名引用即可。
+- **审计写入异步化 + 超时** —— 审计写入卸载到缓冲队列 + 后台 worker，并带单条写入的墙钟超时；数据库慢/卡死也绝不阻塞响应路径（best-effort，失败放开）。
+- **上游韧性** —— 上游崩溃/退出自动重连重启；审计写入失败时客户端收到明确的 `-32002` 错误，而非静默挂起。
+- **回放 UI** —— 可在 Web 控制台（Dashboard / Call Logs / Replay）查看并回放历史 `tools/call` 调用。
+- **优雅关闭** —— 收到 `SIGINT`/`SIGTERM` 时，先排干审计缓冲队列（受 `audit.shutdown_flush_timeout_ms` 约束，默认 5s）再关库，并给在途请求下发明确的 `upstream disconnected` 错误，不再让客户端挂死。
+
 ## 路线图
 
 - **v0.1** ✅ stdio / SSE 传输、审计（SQLite + PostgreSQL）、脱敏、限流、控制台、回放。
 - **v0.2** ✅ LLM 辅助脱敏、控制台内规则增删改、JSON / CSV 导出。
-- **v0.3**（进行中）——稳定性与生产可用性：配置热加载、上游异常退出的优雅处理、审计写入失败降级、告警 webhook、统计面板增强、预置脱敏规则模板完善、7×24 稳定性测试。
-- **v1.0** ——生产环境可用：文档完整、一键安装（脚本 / brew / `go install` / Docker）、SSE 模式下的 TLS。
-- **v2.0+** ——多租户、策略引擎、分布式部署。不承诺时间线。
+- **v0.3** ✅ 稳定性与生产可用性：预置脱敏模板、审计写入异步化+超时降级、上游重连、回放 UI、优雅关闭 flush。
+- **v0.4** 📋（计划中）——稳定性 / 7×24 soak 测试（内部质量，非新功能）。
 
 ## License
 

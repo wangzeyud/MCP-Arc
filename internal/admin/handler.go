@@ -28,7 +28,7 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]interface{}{"records": recs})
+	writeJSON(w, http.StatusOK, map[string]any{"records": recs})
 }
 
 func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
@@ -81,7 +81,7 @@ func (s *Server) handleReplay(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]interface{}{
+	writeJSON(w, http.StatusOK, map[string]any{
 		"tool":     rec.ToolName,
 		"response": json.RawMessage(resp),
 	})

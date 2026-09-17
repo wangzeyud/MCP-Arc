@@ -27,10 +27,10 @@ func TestTokenizePath(t *testing.T) {
 }
 
 func TestSetPath(t *testing.T) {
-	newRoot := func() map[string]interface{} {
-		return map[string]interface{}{
-			"user":  map[string]interface{}{"email": "a@b.com"},
-			"items": []interface{}{map[string]interface{}{"note": "x"}, "y"},
+	newRoot := func() map[string]any {
+		return map[string]any{
+			"user":  map[string]any{"email": "a@b.com"},
+			"items": []any{map[string]any{"note": "x"}, "y"},
 		}
 	}
 
@@ -38,7 +38,7 @@ func TestSetPath(t *testing.T) {
 	if !setPath(root, "user.email", "****") {
 		t.Fatal("setPath on an existing key should succeed")
 	}
-	if root["user"].(map[string]interface{})["email"] != "****" {
+	if root["user"].(map[string]any)["email"] != "****" {
 		t.Errorf("user.email not replaced: %#v", root["user"])
 	}
 
@@ -48,7 +48,7 @@ func TestSetPath(t *testing.T) {
 	if !setPath(root, "items[1]", "****") {
 		t.Error("setPath should replace array elements")
 	}
-	if root["items"].([]interface{})[1] != "****" {
+	if root["items"].([]any)[1] != "****" {
 		t.Errorf("items[1] not replaced: %#v", root["items"])
 	}
 
@@ -74,7 +74,7 @@ func TestUpdateDropsDisabledRulesAndKeepsOldOnesOnError(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	out, err := m.Mask(map[string]interface{}{"n": "a1b", "pwd": "secret"})
+	out, err := m.Mask(map[string]any{"n": "a1b", "pwd": "secret"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -88,7 +88,7 @@ func TestUpdateDropsDisabledRulesAndKeepsOldOnesOnError(t *testing.T) {
 	if err := m.Update([]Spec{{Name: "bad", Patterns: []string{"([unclosed"}, Enabled: true}}); err == nil {
 		t.Fatal("expected a regex compile error")
 	}
-	out, _ = m.Mask(map[string]interface{}{"n": "a1b"})
+	out, _ = m.Mask(map[string]any{"n": "a1b"})
 	if out["n"] != "aXb" {
 		t.Error("a failed Update must leave the previous rules intact")
 	}
@@ -99,11 +99,11 @@ func TestUpdateDropsDisabledRulesAndKeepsOldOnesOnError(t *testing.T) {
 type fakeDetector struct {
 	findings []Finding
 	err      error
-	seen     map[string]interface{}
+	seen     map[string]any
 	calls    int
 }
 
-func (f *fakeDetector) Detect(v map[string]interface{}) ([]Finding, error) {
+func (f *fakeDetector) Detect(v map[string]any) ([]Finding, error) {
 	f.calls++
 	f.seen = v
 	return f.findings, f.err
@@ -117,7 +117,7 @@ func TestDetectorRunsAfterStaticRules(t *testing.T) {
 	det := &fakeDetector{findings: []Finding{{Path: "note", Type: "person"}}}
 	m.SetDetector(det, false)
 
-	out, err := m.Mask(map[string]interface{}{"pwd": "hunter2", "note": "call 张三"})
+	out, err := m.Mask(map[string]any{"pwd": "hunter2", "note": "call 张三"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -137,7 +137,7 @@ func TestDetectorFailureFailsOpen(t *testing.T) {
 	det := &fakeDetector{err: errors.New("endpoint down")}
 	m.SetDetector(det, false)
 
-	out, err := m.Mask(map[string]interface{}{"pwd": "hunter2", "note": "keep me"})
+	out, err := m.Mask(map[string]any{"pwd": "hunter2", "note": "keep me"})
 	if err != nil {
 		t.Fatalf("detector failure must not surface as an error: %v", err)
 	}
@@ -156,7 +156,7 @@ func TestDetectorIgnoresHallucinatedPaths(t *testing.T) {
 	}
 	m.SetDetector(&fakeDetector{findings: []Finding{{Path: "ghost"}, {Path: ""}}}, false)
 
-	out, err := m.Mask(map[string]interface{}{"a": "b"})
+	out, err := m.Mask(map[string]any{"a": "b"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -175,7 +175,7 @@ func TestDetectorSkippedForResultsUnlessEnabled(t *testing.T) {
 	}
 	det := &fakeDetector{}
 	m.SetDetector(det, false)
-	if _, err := m.MaskResult(map[string]interface{}{"a": "b"}); err != nil {
+	if _, err := m.MaskResult(map[string]any{"a": "b"}); err != nil {
 		t.Fatal(err)
 	}
 	if det.calls != 0 {
@@ -183,7 +183,7 @@ func TestDetectorSkippedForResultsUnlessEnabled(t *testing.T) {
 	}
 
 	m.SetDetector(det, true)
-	if _, err := m.MaskResult(map[string]interface{}{"a": "b"}); err != nil {
+	if _, err := m.MaskResult(map[string]any{"a": "b"}); err != nil {
 		t.Fatal(err)
 	}
 	if det.calls != 1 {
@@ -196,7 +196,7 @@ func TestMaskDeepCopies(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	in := map[string]interface{}{"pwd": "hunter2"}
+	in := map[string]any{"pwd": "hunter2"}
 	out, err := m.Mask(in)
 	if err != nil {
 		t.Fatal(err)

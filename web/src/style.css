@@ -1,0 +1,16 @@
+html,
+body {
+  height: 100%;
+  margin: 0;
+}
+
+/* The console runs inside a fixed-size app window; content scrolls within the
+   panes, so the window itself must never show a scrollbar. The default body
+   margin plus a 100vh container was producing one. */
+body {
+  overflow: hidden;
+}
+
+#app {
+  height: 100%;
+}
