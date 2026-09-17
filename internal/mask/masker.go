@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -173,10 +174,8 @@ func (m *Masker) maskValue(v any, path string, rules []Rule) any {
 
 func matchField(rules []Rule, name string) bool {
 	for _, rule := range rules {
-		for _, f := range rule.Fields {
-			if f == name {
-				return true
-			}
+		if slices.Contains(rule.Fields, name) {
+			return true
 		}
 	}
 	return false

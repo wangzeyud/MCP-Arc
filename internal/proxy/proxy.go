@@ -51,7 +51,7 @@ type Proxy struct {
 
 	mu         sync.Mutex
 	upstreamMu sync.RWMutex
-	seq        int64
+	seq        atomic.Int64
 	pending    map[string]*pendingCall
 }
 
@@ -262,7 +262,7 @@ func (p *Proxy) Replay(ctx context.Context, toolName string, rawParams []byte) (
 	if err != nil || args == nil {
 		args = map[string]any{}
 	}
-	upID := fmt.Sprintf("gw-%d", atomic.AddInt64(&p.seq, 1))
+	upID := fmt.Sprintf("gw-%d", p.seq.Add(1))
 	ch := make(chan []byte, 1)
 	now := time.Now()
 	pc := &pendingCall{

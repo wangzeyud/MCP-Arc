@@ -5,9 +5,10 @@ the build/test workflow, and how the repo is laid out.
 
 ## Prerequisites
 
-- **Go 1.22+** with a C compiler (CGO) — required by the `mattn/go-sqlite3` driver.
+- **Go 1.27+** with a C compiler (CGO) — required by the `mattn/go-sqlite3` driver.
   - macOS: `brew install go && xcode-select --install`
-  - Linux: install `gcc`/`build-essential`. Windows is not tested.
+  - Linux: install `gcc`/`build-essential`.
+  - Windows: supported — build the GUI binary with `go build -ldflags "-H=windowsgui" ./cmd/mcp-arc`.
 - **Node 20+** — only needed to rebuild the embedded Vue3 console (`web/`).
 
 ## Build & test
@@ -93,6 +94,7 @@ Audit backend: set `audit.driver: sqlite` (default, `dsn` = file path) or
 ## Guidelines
 
 - Run `gofmt -w` (or `go fmt ./...`) and `go vet ./...` before opening a PR.
+- Keep code modern: prefer current Go idioms (see [JetBrains/go-modern-guidelines](https://github.com/JetBrains/go-modern-guidelines)). The `modernize` analyzer can suggest updates — `go run golang.org/x/tools/go/analysis/passes/modernize/cmd/modernize@latest ./...`. Disable `omitzero` (`-omitzero=false`) so it does not rewrite JSON struct tags (audit records are serialized as JSON).
 - Keep the single-binary, zero-external-dependency runtime promise: the web
   console is embedded, and the proxy runs with just a config file.
 - Add/extend masking rules in `config.yaml` (`masking.rules`) rather than

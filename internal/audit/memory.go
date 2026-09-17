@@ -1,6 +1,7 @@
 package audit
 
 import (
+	"slices"
 	"sync"
 	"time"
 )
@@ -38,8 +39,8 @@ func (s *MemoryStore) Query(opts QueryOpts) ([]CallRecord, error) {
 	defer s.mu.Unlock()
 	out := make([]CallRecord, 0, len(s.calls))
 	// newest first, mirroring the sqlite backend's ORDER BY id DESC.
-	for i := len(s.calls) - 1; i >= 0; i-- {
-		r := s.calls[i]
+	for _, r := range slices.Backward(s.calls) {
+
 		if opts.ClientID != "" && r.ClientID != opts.ClientID {
 			continue
 		}

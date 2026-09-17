@@ -447,11 +447,11 @@ type slowInsertStore struct {
 	fakeRuleStore
 	mu      sync.Mutex
 	records []*audit.CallRecord
-	calls   int64
+	calls   atomic.Int64
 }
 
 func (s *slowInsertStore) Insert(r *audit.CallRecord) error {
-	if atomic.AddInt64(&s.calls, 1) == 1 {
+	if s.calls.Add(1) == 1 {
 		time.Sleep(200 * time.Millisecond)
 	}
 	s.mu.Lock()
@@ -544,8 +544,7 @@ func TestUpstreamSupervisorReconnects(t *testing.T) {
 	f := &fakeUpstream{}
 	factory := func() (transport.UpstreamTransporter, error) { return f, nil }
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	go p.upstreamSupervisor(ctx, factory)
 
 	time.Sleep(1200 * time.Millisecond)

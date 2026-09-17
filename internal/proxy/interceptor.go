@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"sync/atomic"
 	"time"
 
 	"github.com/dodoyu-sama/mcp-arc/internal/audit"
@@ -93,7 +92,7 @@ func (p *Proxy) processClientMessage(raw []byte, respond func([]byte) error) (fo
 	}
 
 	// gateway-unique id for correlation across concurrent client sessions
-	upID := fmt.Sprintf("gw-%d", atomic.AddInt64(&p.seq, 1))
+	upID := fmt.Sprintf("gw-%d", p.seq.Add(1))
 	now := time.Now()
 	origIDRaw, _ := json.Marshal(id)
 	pc := &pendingCall{respond: respond, origIDRaw: origIDRaw, start: now, deadline: now.Add(pendingTTL)}
