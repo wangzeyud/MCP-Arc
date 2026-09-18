@@ -2,104 +2,65 @@
 
 # MCP Arc
 
-A **lightweight MCP proxy** that sits between an MCP client and an MCP server.
-One command adds audit logging, parameter masking, call replay and per-client
-rate limiting to any MCP call — without touching the protocol, and without
-locking you to a vendor.
+A lightweight MCP proxy between an MCP client and server. One command adds audit
+logging, parameter masking, call replay, and per-client rate limiting — without
+touching the protocol or locking you to a vendor.
 
-```
-MCP client  ──────▶  MCP Arc  ──────▶  MCP server
-(Claude Desktop /     │  governance    (node / python / …)
- Cherry Studio /      │
- Cursor …)            └─ audit ─▶ SQLite / PostgreSQL
-```
-
-**Source:** https://github.com/wangzeyud/MCP-Arc
+Source: https://github.com/wangzeyud/MCP-Arc
 
 ## What it does
 
-MCP Arc does exactly four things, and nothing else:
+Exactly four things:
 
 | | |
 |---|---|
-| **Parameter masking** | Redacts PII / secrets in `tools/call` arguments (and results) before anything is persisted. Regex patterns + sensitive field names, configured in YAML or edited at runtime. |
-| **Call audit** | Who (`client_id`), when, which tool, what params, what result, how long, success or error — persisted to SQLite (default) or PostgreSQL. |
-| **Replay** | Re-issue a recorded `tools/call` to the upstream verbatim, for debugging flaky tools and for compliance re-execution. |
-| **Rate limiting** | Per-`client_id` token-bucket QPS + daily quota, so a noisy client can't starve the upstream. |
+| **Parameter masking** | Redacts PII / secrets in `tools/call` args (and results) before persisting. Regex patterns + sensitive field names, configured in YAML or edited at runtime. |
+| **Call audit** | Who (`client_id`), when, which tool, what params/result, duration, success/error — to SQLite (default) or PostgreSQL. |
+| **Replay** | Re-issue a recorded `tools/call` to the upstream verbatim, for debugging or compliance re-execution. |
+| **Rate limiting** | Per-`client_id` token-bucket QPS + daily quota. |
 
-The single embedded Vue3 console is the **observability UI** for the four
-capabilities above (audit logs, masking rules, replay) — it is not a fifth
-feature. Masking rules are editable at runtime (hot-reloaded, no restart), and
-audit records can be exported as JSON / CSV.
+The embedded Vue3 console is the **observability UI** for the four capabilities
+above — not a fifth feature. Rules are hot-reloaded; audit records exportable as JSON / CSV.
 
 ## Design
 
-- It works at the **transport layer** (stdio / SSE), not inside the protocol.
-- The only MCP knowledge it relies on is the `tools/call` method name and the
-  `params.{name,arguments}` shape.
+- Works at the **transport layer** (stdio / SSE), not inside the protocol.
+- Only MCP knowledge used: the `tools/call` method and the `params.{name,arguments}` shape.
 - Requests are correlated by rewriting the JSON-RPC `id` and restoring it on the
-  way back; responses are **matched**, not parsed. Everything else is
-  protocol-agnostic plumbing, so spec changes don't force a rewrite.
-- Messages it does not need to touch are forwarded byte-for-byte.
+  way back; responses are **matched**, not parsed. Untouched messages forward byte-for-byte.
 
 ## Install
 
-MCP Arc ships as a single binary. Pick the path that fits you:
+Ships as a single binary.
 
-### A. Docker (easiest — no Go or Node needed)
-
-Only Docker is required; the container builds the binary **and** the web console
-for you, so your machine stays clean.
-
+### A. Docker
 ```bash
 docker compose up --build                       # SQLite backend, console on :8080
 docker compose --profile postgres up --build    # PostgreSQL backend
 ```
-
-The proxy is then reachable at `http://localhost:8081/sse` (gateway mode). Skip
-ahead to [Wiring into a real client](#wiring-into-a-real-client).
+Proxy reachable at `http://localhost:8081/sse`.
 
 ### B. Prebuilt binary (planned for v1.0)
+One-command install (`brew` / `go install`) and ready-made binaries are on the
+roadmap for **v1.0**. Until then use Docker or build from source.
 
-One-command install (script / `brew` / `go install`) and ready-made binaries for
-Windows / macOS / Linux are on the roadmap for **v1.0**. Until then, use Docker
-(Option A) or build from source (Option C).
-
-### C. Build from source (developers)
-
-Requires **Go 1.27**. The SQLite driver is pure-Go (`modernc.org/sqlite`), so
-**no C compiler (CGO) is needed**.
-
+### C. Build from source
+Requires **Go 1.27**. SQLite driver is pure-Go (`modernc.org/sqlite`) — **no CGO needed**.
 ```bash
-# 1) build the embedded web console — its files live in web/, NOT the repo root
-cd web && npm install && npm run build && cd ..
-
-# 2) build the binary
-go build -o mcp-arc ./cmd/mcp-arc          # macOS / Linux
-# go build -o mcp-arc.exe ./cmd/mcp-arc   # Windows
+cd web && npm install && npm run build && cd ..   # build the embedded console (lives in web/)
+go build -o mcp-arc ./cmd/mcp-arc                 # macOS / Linux
+# go build -o mcp-arc.exe ./cmd/mcp-arc           # Windows
 ```
-
-> ⚠️ If you run `npm install` from the repo root you'll see
-> `ENOENT ... package.json`: the frontend project is in the **`web/`** folder.
-> (The `Makefile`'s `make build` runs both steps, but `make` isn't bundled with
-> Windows — the commands above work on every OS.)
+> ⚠️ Run `npm install` from `web/`, not the repo root (no `package.json` there).
 
 ## Quick start
-
-With the `mcp-arc` binary (or the Docker container) ready, pipe two JSON-RPC
-messages through the proxy to watch masking + audit work:
-
 ```bash
 printf '%s\n' \
   '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' \
   '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"echo","arguments":{"message":"my email is a@b.com and pwd secret123"}}}' \
   | ./mcp-arc --upstream "node examples/echo-server/server.js"
 ```
-
-The upstream responses print out and `mcp-arc.db` is created. In the audit log the
-email and the `pwd` field are stored **masked**, while the real request still
-reaches the upstream untouched:
-
+Email and `pwd` are stored **masked**; the real request reaches the upstream untouched. View logs:
 ```bash
 curl -H "Authorization: Bearer change-me" localhost:8080/api/logs
 curl -H "Authorization: Bearer change-me" localhost:8080/api/stats
@@ -107,15 +68,12 @@ curl -H "Authorization: Bearer change-me" localhost:8080/api/stats
 
 ## Transports
 
-Client side and upstream side are configured independently; both support `stdio`
-and `sse`.
-
 | `transport.client` | `transport.upstream` | scenario |
 |---|---|---|
-| `stdio` (default) | `stdio` (default) | local transparent proxy — the client spawns MCP Arc directly |
-| `sse` | `stdio` | **gateway mode** — remote / multiple clients over HTTP, Arc fronts a local stdio server |
-| `sse` | `sse` | fully remote — Arc governs in the middle, HTTP on both sides |
-| `stdio` | `sse` | forward a local client's calls to a remote SSE server |
+| `stdio` (default) | `stdio` (default) | local transparent proxy |
+| `sse` | `stdio` | **gateway mode** — remote clients over HTTP, Arc fronts a local stdio server |
+| `sse` | `sse` | fully remote |
+| `stdio` | `sse` | local client → remote SSE server |
 
 ```yaml
 server:
@@ -125,30 +83,15 @@ transport:
   listen: ":8081"
   upstream: stdio
 ```
+Clients connect to `http://host:8081/sse`.
 
-Clients then connect to `http://host:8081/sse` (GET for the event stream, POST
-`/messages?sessionId=...` to send).
-
-### CLI flags
-
-`--config`, `--upstream`, `--client-transport` (`stdio`|`sse`), `--listen`,
-`--upstream-transport` (`stdio`|`sse`), `--upstream-url`.
-
-```bash
-./mcp-arc --client-transport sse --listen :8081 \
-          --upstream-transport sse --upstream-url https://host/mcp/sse
-```
+CLI flags: `--config`, `--upstream`, `--client-transport` (`stdio`|`sse`), `--listen`, `--upstream-transport` (`stdio`|`sse`), `--upstream-url`.
 
 ## Wiring into a real client
 
-You don't change your MCP server at all — you just tell your **client** to launch
-MCP Arc and talk to it instead of the server directly.
+Point the **client** at `mcp-arc` instead of the server directly.
 
-### Local (stdio, default)
-
-Point the client at the `mcp-arc` binary. This `mcpServers` entry works in
-Claude Desktop, Cursor, Cline, Windsurf, Zed, and most other MCP clients:
-
+### Local (stdio)
 ```json
 {
   "mcpServers": {
@@ -159,23 +102,15 @@ Claude Desktop, Cursor, Cline, Windsurf, Zed, and most other MCP clients:
   }
 }
 ```
+Works in Claude Desktop, Cursor, Cline, Windsurf, Zed, etc.
+- **Claude Desktop** — `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) / `%APPDATA%\Claude\claude_desktop_config.json` (Windows)
+- **Cursor** — `.cursor/mcp.json`
+- **Cherry Studio / Trae / 5ire / Lingma** — Settings → MCP → add local server
 
-Where to paste it:
-- **Claude Desktop** — `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) or `%APPDATA%\Claude\claude_desktop_config.json` (Windows)
-- **Cursor** — `.cursor/mcp.json` in your project (or `~/.cursor/mcp.json`)
-- **Cherry Studio / Trae / 5ire / Lingma** — Settings → MCP → "add local server" → fill the command + args above
-
-Restart the client afterwards; it spawns `mcp-arc`, which in turn spawns your real
-server. That's the whole setup.
+Restart the client afterwards.
 
 ### Remote (SSE gateway)
-
-If you'd rather run Arc as a shared gateway (e.g. the Docker container, or on a
-server), run it in gateway mode and point the client at its SSE URL instead of a
-command:
-
 ```yaml
-# config.yaml
 transport:
   client: sse
   listen: ":8081"
@@ -183,65 +118,53 @@ transport:
 server:
   upstream: ["node", "/path/to/your-server.js"]
 ```
-
 ```json
 {
   "mcpServers": {
-    "my-server-via-mcp-arc": {
-      "type": "sse",
-      "url": "http://host:8081/sse"
-    }
+    "my-server-via-mcp-arc": { "type": "sse", "url": "http://host:8081/sse" }
   }
 }
 ```
 
 ## Configuration
 
-See `config.yaml`. Key sections:
+See `config.yaml`.
 
 | key | meaning |
 |---|---|
 | `server.client_id` | label stored on every audit record (or `MCP_ARC_CLIENT_ID`) |
-| `server.upstream` | upstream command + args written in config, instead of `--upstream` |
-| `transport` | `client` / `upstream` (`stdio`\|`sse`), `listen` (SSE bind addr), `upstream_url` |
+| `server.upstream` | upstream command + args in config, instead of `--upstream` |
+| `transport` | `client` / `upstream` (`stdio`\|`sse`), `listen`, `upstream_url` |
 | `audit` | `enabled`, `driver: sqlite` (default) or `postgres`, `dsn` |
-| `masking` | `enabled` + `rules` (regex `patterns` and/or `fields`) + optional `presets` (named template list) |
+| `masking` | `enabled` + `rules` (regex `patterns` and/or `fields`) + optional `presets` |
 | `llm` | optional LLM-assisted masking: `enabled`, `endpoint`, `api_key`, `model`, `timeout_ms`, `max_bytes`, `cache_ttl_seconds`, `apply_to_result` |
 | `rate_limit` | `enabled`, `qps`, `daily_quota` (per `client_id`) |
-| `admin` | `enabled`, `port`, `token` (Bearer token for the console) |
+| `admin` | `enabled`, `port`, `token` (console Bearer token) |
 
 ## Masking rules
 
-Rules live in the database (`mask_rules` table), not just in YAML: on first run
-the rules from `config.yaml` are **seeded** in (`source: config`), and from then
-on the console owns them — create, edit, enable/disable and delete at runtime.
-Every write **hot-reloads** the masker, so the next tool call uses the new rules
-without a restart.
+Rules live in the database (`mask_rules`); on first run, `config.yaml` rules are
+**seeded** (`source: config`), then owned by the console (create / edit / enable /
+disable / delete at runtime). Every write **hot-reloads** the masker — next call
+uses the new rules without restart.
+
+Regexes are compile-checked on save, so a bad pattern is rejected instead of silently disabling masking.
 
 ### Preset templates
-
-Common PII patterns ship as named presets so you don't re-derive them. Enable
-them by listing names under `masking.presets` in `config.yaml`:
+Enabled by listing names under `masking.presets`:
 
 | preset | matches | mask |
 |---|---|---|
-| `phone_cn` | mainland China mobile numbers | `[PHONE]` |
-| `ip` | IPv4 addresses | `[IP]` |
-| `bank_card_cn` | UnionPay cards (start with 62) | `[BANKCARD]` |
+| `phone_cn` | mainland China mobile | `[PHONE]` |
+| `ip` | IPv4 | `[IP]` |
+| `bank_card_cn` | UnionPay (start 62) | `[BANKCARD]` |
 | `passport` | passport numbers | `[PASSPORT]` |
 | `mac` | MAC addresses | `[MAC]` |
 
-They are seeded into the rules table like any config rule, so the console can
-still edit or disable them. Names, addresses and other free-text PII are
-deliberately excluded — use the LLM second pass for those.
-
-A rule needs a `name` plus at least one `pattern` or `field`; regexes are
-compile-checked on save, so a bad pattern is rejected instead of silently
-disabling masking.
+Names/addresses (free-text PII) are deliberately excluded — use the LLM second pass.
 
 ```bash
 curl -H "Authorization: Bearer change-me" localhost:8080/api/rules
-
 curl -X POST -H "Authorization: Bearer change-me" -H "Content-Type: application/json" \
   -d '{"name":"phone_cn","patterns":["\\b1[3-9]\\d{9}\\b"],"mask_char":"[PHONE]"}' \
   localhost:8080/api/rules
@@ -249,79 +172,65 @@ curl -X POST -H "Authorization: Bearer change-me" -H "Content-Type: application/
 
 ## LLM-assisted masking
 
-An optional second pass for free-text PII that static rules miss. The model only
-sees the **already-masked** payload and returns the paths still worth redacting;
-values already redacted never leave the process, and hallucinated paths are
-ignored. It **fails open**: on error, timeout, or a payload over `max_bytes`, the
-static result stands and the call proceeds.
+Optional second pass for free-text PII static rules miss. The model sees only the
+**already-masked** payload and returns paths still worth redacting; redacted values
+never leave the process, hallucinated paths are ignored. **Fails open**: on error,
+timeout, or `max_bytes` exceeded, the static result stands and the call proceeds.
 
 ```yaml
 llm:
   enabled: true
   endpoint: "https://api.openai.com/v1"   # any OpenAI-compatible endpoint
-  # api_key: prefer MCP_ARC_LLM_API_KEY
   model: "gpt-4o-mini"
   timeout_ms: 3000
   max_bytes: 8192
-  apply_to_result: false                  # also scan upstream results?
+  apply_to_result: false
 ```
 
 ## Export
-
 ```bash
 curl -H "Authorization: Bearer change-me" "localhost:8080/api/export?format=csv"
 curl -H "Authorization: Bearer change-me" "localhost:8080/api/export?format=json&limit=5000"
 curl -H "Authorization: Bearer change-me" "localhost:8080/api/export?format=json&raw=1"  # includes unmasked values
 ```
-
-Filterable by `client_id` / `tool` / `limit` (max 10000). Exports contain the
-**masked** params and results; unmasked `raw_params` / `raw_result` are only
-included with an explicit `raw=1`. The console's Call Logs page wires Export
-JSON / CSV to the same endpoint.
+Filterable by `client_id` / `tool` / `limit` (max 10000). Exports contain **masked** params/results; unmasked `raw_params` / `raw_result` only with `raw=1`.
 
 ## Web console
-
-The Vue3 console is compiled into the binary (`//go:embed`) and served by the
-admin HTTP server — no separate frontend process.
-
+Vue3 console compiled into the binary (`//go:embed`), served by the admin HTTP server — no separate frontend process.
 ```bash
 ./mcp-arc --config config.dev.yaml
 # open http://localhost:8080  →  Dashboard / Call Logs / Rules
 ```
 
 ## Replay
-
-Every `tools/call` is recorded with its original (unmasked) request params and
-the raw upstream response:
-
+Every `tools/call` is recorded with its original (unmasked) request params and raw upstream response.
 ```bash
-# 1) find a call id
-curl -H "Authorization: Bearer change-me" localhost:8080/api/logs
-
-# 2) replay it (returns the upstream's raw JSON-RPC response)
+curl -H "Authorization: Bearer change-me" localhost:8080/api/logs        # find a call id
 curl -X POST -H "Authorization: Bearer change-me" -H "Content-Type: application/json" \
-     -d '{"call_id": 1}' localhost:8080/api/replay
+     -d '{"call_id": 1}' localhost:8080/api/replay                       # replay
 ```
-
-Replay rides the same id-rewrite / response-correlation machinery as a live
-call, so it works for stdio and SSE upstreams alike.
+Rides the same id-rewrite / response-correlation machinery as a live call (stdio + SSE upstreams).
 
 ## Changelog
 
+### v0.4 — stability / soak testing
+- **Soak stability test** — `TestProxySoakStability` drives 20k proxy round-trips, asserting zero pending-request leaks, audit-count consistency, and bounded goroutine growth.
+- **Race verification** — full `go test -race ./...` passes with no data races across proxy / mask / audit / admin / llm.
+- Internal quality only; no new product capabilities.
+
 ### v0.3 — stability & production readiness
-- **Preset masking templates** — built-in `phone_cn` / `ip` / `bank_card_cn` / `passport` / `mac` templates; reference them by name under `masking.presets`.
-- **Async, timeout-bounded audit writes** — audit logging is offloaded to a buffered queue + background worker with a per-insert wall-clock timeout, so a slow or hung database can never stall the request path (best-effort, fail-open).
-- **Upstream resilience** — automatic reconnect/restart on upstream crash or exit; on a failed audit write the client gets an explicit `-32002` error instead of a silent hang.
-- **Replay UI** — inspect and replay past `tools/call` invocations from the web console (Dashboard / Call Logs / Replay).
-- **Graceful shutdown** — on `SIGINT`/`SIGTERM` the proxy drains the buffered audit queue (bounded by `audit.shutdown_flush_timeout_ms`, default 5s) before closing the store, and fails in-flight requests with a clear `upstream disconnected` error instead of leaving clients hanging.
+- **Preset masking templates** — `phone_cn` / `ip` / `bank_card_cn` / `passport` / `mac`; reference by name under `masking.presets`.
+- **Async, timeout-bounded audit writes** — buffered queue + background worker with per-insert timeout; a slow DB never stalls the request path (fail-open).
+- **Upstream resilience** — auto reconnect/restart on upstream crash; failed audit write returns explicit `-32002` instead of a silent hang.
+- **Replay UI** — inspect and replay past `tools/call` from the console.
+- **Graceful shutdown** — on `SIGINT`/`SIGTERM`, drains the buffered audit queue (bounded by `audit.shutdown_flush_timeout_ms`, default 5s) before closing the store; in-flight requests fail with a clear `upstream disconnected` error.
 
 ## Roadmap
 
 - **v0.1** ✅ stdio / SSE transports, audit (SQLite + PostgreSQL), masking, rate limit, console, replay.
 - **v0.2** ✅ LLM-assisted masking, rule CRUD in the console, JSON / CSV export.
-- **v0.3** ✅ stability and production readiness: preset masking templates, async/timeout-bounded audit writes, upstream reconnect, replay UI, graceful shutdown.
-- **v0.4** 📋 (planned) — stability / 7×24 soak testing (internal quality; no new features).
+- **v0.3** ✅ stability and production readiness: preset templates, async/timeout-bounded audit writes, upstream reconnect, replay UI, graceful shutdown.
+- **v0.4** ✅ — stability / soak testing + race verification (internal quality; no new features).
 
 ## License
-
 MIT — see [LICENSE](./LICENSE).
