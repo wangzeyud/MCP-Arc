@@ -7,7 +7,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/dodoyu-sama/mcp-arc/internal/audit"
+	"github.com/wangzeyud/mcp-arc/internal/audit"
 )
 
 // exportRecord is the projection written out by /api/export. Raw (unmasked)

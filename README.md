@@ -14,7 +14,7 @@ MCP client  ──────▶  MCP Arc  ──────▶  MCP server
  Cursor …)            └─ audit ─▶ SQLite / PostgreSQL
 ```
 
-**Source:** https://github.com/dodoyu-sama/MCP-Arc
+**Source:** https://github.com/wangzeyud/MCP-Arc
 
 ## What it does
 

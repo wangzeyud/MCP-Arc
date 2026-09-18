@@ -12,7 +12,7 @@ MCP client  ──────▶  MCP Arc  ──────▶  MCP server
  Cursor …)           └─ 审计 ─▶ SQLite / PostgreSQL
 ```
 
-**项目地址：** https://github.com/dodoyu-sama/MCP-Arc
+**项目地址：** https://github.com/wangzeyud/MCP-Arc
 
 ## 核心功能
 

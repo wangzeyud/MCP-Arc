@@ -5,7 +5,7 @@ import (
 	"log"
 	"time"
 
-	"github.com/dodoyu-sama/mcp-arc/internal/audit"
+	"github.com/wangzeyud/mcp-arc/internal/audit"
 )
 
 // enqueueAudit persists a call record without stalling the response path.

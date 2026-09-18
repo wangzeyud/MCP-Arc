@@ -10,7 +10,7 @@ import (
 	"log"
 	"time"
 
-	"github.com/dodoyu-sama/mcp-arc/internal/audit"
+	"github.com/wangzeyud/mcp-arc/internal/audit"
 )
 
 const (

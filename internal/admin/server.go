@@ -8,8 +8,8 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/dodoyu-sama/mcp-arc/internal/audit"
-	"github.com/dodoyu-sama/mcp-arc/web"
+	"github.com/wangzeyud/mcp-arc/internal/audit"
+	"github.com/wangzeyud/mcp-arc/web"
 )
 
 // Replayer re-issues a previously recorded tools/call to the upstream server.

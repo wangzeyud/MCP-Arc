@@ -6,10 +6,10 @@ import (
 	"log"
 	"time"
 
-	"github.com/dodoyu-sama/mcp-arc/internal/audit"
-	"github.com/dodoyu-sama/mcp-arc/internal/config"
-	"github.com/dodoyu-sama/mcp-arc/internal/llm"
-	"github.com/dodoyu-sama/mcp-arc/internal/mask"
+	"github.com/wangzeyud/mcp-arc/internal/audit"
+	"github.com/wangzeyud/mcp-arc/internal/config"
+	"github.com/wangzeyud/mcp-arc/internal/llm"
+	"github.com/wangzeyud/mcp-arc/internal/mask"
 )
 
 // ErrNoRuleStore is returned by the rule CRUD API when no database is available.

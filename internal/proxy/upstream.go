@@ -7,7 +7,7 @@ import (
 	"log"
 	"time"
 
-	"github.com/dodoyu-sama/mcp-arc/internal/transport"
+	"github.com/wangzeyud/mcp-arc/internal/transport"
 )
 
 const (

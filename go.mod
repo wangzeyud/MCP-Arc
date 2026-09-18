@@ -1,4 +1,4 @@
-module github.com/dodoyu-sama/mcp-arc
+module github.com/wangzeyud/mcp-arc
 
 go 1.27.0
 

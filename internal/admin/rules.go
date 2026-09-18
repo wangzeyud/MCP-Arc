@@ -5,7 +5,7 @@ import (
 	"net/http"
 	"strconv"
 
-	"github.com/dodoyu-sama/mcp-arc/internal/audit"
+	"github.com/wangzeyud/mcp-arc/internal/audit"
 )
 
 // RuleManager is the rule CRUD surface the console talks to. It is satisfied by

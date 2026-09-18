@@ -5,7 +5,7 @@ import (
 	"net/http"
 	"strconv"
 
-	"github.com/dodoyu-sama/mcp-arc/internal/audit"
+	"github.com/wangzeyud/mcp-arc/internal/audit"
 )
 
 func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {

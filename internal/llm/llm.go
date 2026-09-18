@@ -22,7 +22,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/dodoyu-sama/mcp-arc/internal/mask"
+	"github.com/wangzeyud/mcp-arc/internal/mask"
 )
 
 // Config is the resolved runtime configuration (see config.LLMConfig).

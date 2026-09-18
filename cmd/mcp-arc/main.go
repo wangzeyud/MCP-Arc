@@ -12,9 +12,9 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/dodoyu-sama/mcp-arc/internal/config"
-	"github.com/dodoyu-sama/mcp-arc/internal/netutil"
-	"github.com/dodoyu-sama/mcp-arc/internal/proxy"
+	"github.com/wangzeyud/mcp-arc/internal/config"
+	"github.com/wangzeyud/mcp-arc/internal/netutil"
+	"github.com/wangzeyud/mcp-arc/internal/proxy"
 )
 
 func main() {

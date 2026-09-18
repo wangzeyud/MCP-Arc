@@ -10,7 +10,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/dodoyu-sama/mcp-arc/internal/audit"
+	"github.com/wangzeyud/mcp-arc/internal/audit"
 )
 
 // fakeReplayer captures the args handed to Replay so tests can assert the

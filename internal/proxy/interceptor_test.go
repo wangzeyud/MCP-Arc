@@ -10,11 +10,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/dodoyu-sama/mcp-arc/internal/audit"
-	"github.com/dodoyu-sama/mcp-arc/internal/config"
-	"github.com/dodoyu-sama/mcp-arc/internal/mask"
-	"github.com/dodoyu-sama/mcp-arc/internal/ratelimit"
-	"github.com/dodoyu-sama/mcp-arc/internal/transport"
+	"github.com/wangzeyud/mcp-arc/internal/audit"
+	"github.com/wangzeyud/mcp-arc/internal/config"
+	"github.com/wangzeyud/mcp-arc/internal/mask"
+	"github.com/wangzeyud/mcp-arc/internal/ratelimit"
+	"github.com/wangzeyud/mcp-arc/internal/transport"
 )
 
 // capturingStore records audit inserts so the interception chain can be

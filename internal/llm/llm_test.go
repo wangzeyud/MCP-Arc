@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/dodoyu-sama/mcp-arc/internal/mask"
+	"github.com/wangzeyud/mcp-arc/internal/mask"
 )
 
 func TestParseFindings(t *testing.T) {

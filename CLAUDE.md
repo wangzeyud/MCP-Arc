@@ -95,4 +95,4 @@ https://github.com/JetBrains/go-modern-guidelines
 
 ## 仓库
 
-https://github.com/dodoyu-sama/MCP-Arc
+https://github.com/wangzeyud/MCP-Arc
