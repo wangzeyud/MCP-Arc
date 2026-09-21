@@ -108,10 +108,10 @@ func main() {
 
 	rootCmd.Flags().StringVar(&configPath, "config", "config.yaml", "path to YAML config file")
 	rootCmd.Flags().StringVar(&upstream, "upstream", "", "upstream command, e.g. 'node server.js'")
-	rootCmd.Flags().StringVar(&clientTransport, "client-transport", "", "client transport: stdio | sse")
-	rootCmd.Flags().StringVar(&listen, "listen", "", "listen address for SSE client transport, e.g. :8081")
-	rootCmd.Flags().StringVar(&upstreamTrans, "upstream-transport", "", "upstream transport: stdio | sse")
-	rootCmd.Flags().StringVar(&upstreamURL, "upstream-url", "", "upstream /sse URL when upstream transport = sse")
+	rootCmd.Flags().StringVar(&clientTransport, "client-transport", "", "client transport: stdio | sse | streamable-http")
+	rootCmd.Flags().StringVar(&listen, "listen", "", "listen address for HTTP client transports, e.g. :8081")
+	rootCmd.Flags().StringVar(&upstreamTrans, "upstream-transport", "", "upstream transport: stdio | sse | streamable-http")
+	rootCmd.Flags().StringVar(&upstreamURL, "upstream-url", "", "upstream endpoint URL when upstream transport = sse | streamable-http")
 
 	if err := rootCmd.Execute(); err != nil {
 		log.Fatal(err)
@@ -133,14 +133,23 @@ func resolvePorts(cfg *config.Config) (consoleURL, sseURL string) {
 		consoleURL = fmt.Sprintf("http://localhost:%d/", port)
 		log.Printf("mcp-arc: console: %s", consoleURL)
 	}
-	if cfg.Transport.Client == "sse" {
+	if cfg.Transport.Client == "sse" || cfg.Transport.Client == "streamable-http" {
 		addr, moved := netutil.FreeListenAddr(cfg.Transport.Listen)
 		if moved {
-			log.Printf("warn: SSE port %s is already in use, using %s instead", cfg.Transport.Listen, addr)
+			log.Printf("warn: client port %s is already in use, using %s instead", cfg.Transport.Listen, addr)
 		}
 		cfg.Transport.Listen = addr
-		sseURL = netutil.URLForListen(addr, "/sse")
-		log.Printf("mcp-arc: MCP client SSE endpoint: %s", sseURL)
+		if cfg.Transport.Client == "sse" {
+			sseURL = netutil.URLForListen(addr, "/sse")
+			log.Printf("mcp-arc: MCP client SSE endpoint: %s", sseURL)
+		} else {
+			path := cfg.Transport.StreamableHTTPPath
+			if path == "" {
+				path = "/mcp"
+			}
+			sseURL = netutil.URLForListen(addr, path)
+			log.Printf("mcp-arc: MCP client Streamable HTTP endpoint: %s", sseURL)
+		}
 	}
 	return consoleURL, sseURL
 }

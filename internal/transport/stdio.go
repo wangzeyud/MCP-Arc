@@ -12,10 +12,10 @@ import (
 // StdioClient reads JSON-RPC lines from os.Stdin and writes to os.Stdout.
 type StdioClient struct{}
 
-func (StdioClient) Run(ctx context.Context, onMessage func([]byte, func([]byte) error)) error {
+func (StdioClient) Run(ctx context.Context, onMessage func([]byte, func([]byte, bool) error) func()) error {
 	scanner := bufio.NewScanner(os.Stdin)
 	scanner.Buffer(make([]byte, 0, 1024*1024), 16*1024*1024)
-	respond := func(b []byte) error {
+	respond := func(b []byte, _ bool) error {
 		os.Stdout.Write(b)
 		_, err := os.Stdout.Write([]byte{'\n'})
 		return err

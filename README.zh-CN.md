@@ -21,7 +21,7 @@
 
 ## 设计
 
-- 工作在**传输层**（stdio / SSE），不深入 protocol 内部。
+- 工作在**传输层**（stdio / Streamable HTTP / SSE-legacy），不深入 protocol 内部。
 - 唯一 MCP 知识：`tools/call` 方法名与 `params.{name,arguments}` 形状。
 - 请求进来改写 JSON-RPC `id`、响应回来还原，以此关联路由——响应是**匹配**回来的，不是**解析**出来的。不需要处理的消息逐字节原样转发。
 
@@ -66,9 +66,11 @@ curl -H "Authorization: Bearer change-me" localhost:8080/api/stats
 | `transport.client` | `transport.upstream` | 场景 |
 |---|---|---|
 | `stdio`（默认） | `stdio`（默认） | 本地透明代理 |
-| `sse` | `stdio` | **网关模式**：远端/多客户端经 HTTP 连 Arc，Arc 前端一个本地 stdio server |
+| `sse` | `stdio` | **网关模式**：远端/多客户端经 HTTP 连 Arc，Arc 前端一个本地 stdio server（SSE 为 legacy，推荐用 Streamable HTTP） |
 | `sse` | `sse` | 完全远程 |
 | `stdio` | `sse` | 本地 client → 远程 SSE server |
+| `streamable-http` | `streamable-http` | 客户端与 server 经单 POST 端点通信（MCP 2026-07-28） |
+| `streamable-http` | `stdio` | 远端客户端经 Streamable HTTP → 本地 stdio server |
 
 ```yaml
 server:
@@ -80,7 +82,7 @@ transport:
 ```
 客户端连 `http://host:8081/sse`。
 
-命令行参数：`--config`、`--upstream`、`--client-transport`（`stdio`|`sse`）、`--listen`、`--upstream-transport`（`stdio`|`sse`）、`--upstream-url`。
+命令行参数：`--config`、`--upstream`、`--client-transport`（`stdio`|`sse`|`streamable-http`）、`--listen`、`--upstream-transport`（`stdio`|`sse`|`streamable-http`）、`--upstream-url`。
 
 ## 接入真实客户端
 
@@ -202,6 +204,13 @@ curl -X POST -H "Authorization: Bearer change-me" -H "Content-Type: application/
 
 ## 更新日志
 
+### v0.5 —— 规范对齐（MCP 2026-07-28）
+- **Streamable HTTP 传输** —— 客户端与上游均为单 POST 端点（`transport.client` / `transport.upstream: streamable-http`），符合 2026-07-28 规范。旧的 HTTP+SSE 适配器保留为 `sse` 并标记 **legacy**；新部署推荐 Streamable HTTP。
+- **方法无关透传** —— 原样转发所有 JSON-RPC 方法（tools/*、resources/*、prompts/*、sampling、elicitation、roots、subscriptions、MRTR、progress、cancellation 等）；仅对 `tools/call`（及 sampling/elicitation）入参做脱敏/审计解析。
+- **通知作用域与取消传播（T4–T5）** —— 流内通知路由回所属请求而非广播给所有客户端；客户端断开会主动取消在途上游请求。已由代理级 E2E 测试 `TestE2EStreamableHTTPProxyCancelOnClientDisconnect` 验证。
+- **`InputRequiredResult` 审计** —— 审计且不嵌套脱敏。
+- 传输单测 + soak 变体；SSE 标记 legacy。
+
 ### v0.4 —— 稳定性 / soak 测试
 - **soak 稳定性测试** —— `TestProxySoakStability` 驱动 2 万次代理往返，断言无 pending 请求泄漏、审计计数一致、goroutine 数量有界。
 - **race 验证** —— 全量 `go test -race ./...` 在 proxy / mask / audit / admin / llm 各包均通过，无数据竞争。
@@ -220,6 +229,7 @@ curl -X POST -H "Authorization: Bearer change-me" -H "Content-Type: application/
 - **v0.2** ✅ LLM 辅助脱敏、控制台内规则增删改、JSON / CSV 导出。
 - **v0.3** ✅ 稳定性与生产可用性：预置脱敏模板、审计写入异步化+超时降级、上游重连、回放 UI、优雅关闭 flush。
 - **v0.4** ✅——稳定性 / soak 测试 + race 验证（内部质量，非新功能）。
+- **v0.5** ✅——规范对齐（MCP 2026-07-28）：Streamable HTTP 传输、方法无关透传、通知作用域与取消传播（客户端断开取消在途上游）、`InputRequiredResult` 审计；SSE 标记 legacy。
 
 ## License
 MIT —— 见 [LICENSE](./LICENSE)。

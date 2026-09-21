@@ -1,0 +1,24 @@
+---
+description: MCP Arc 项目本质、范围边界与架构红线（transport 层方法无关透传 / stdio+Streamable HTTP / 零侵入 / 低依赖 / 配置驱动），违反任何一条都算偏离。
+alwaysApply: true
+enabled: true
+updatedAt: 2026-09-21T10:30:00.000Z
+provider:
+---
+
+# 项目本质（不可动摇）
+
+MCP Arc 是一个轻量的 MCP Proxy / Sidecar，位于 MCP client 和 MCP server 之间。
+一行命令为任意 MCP 调用加上审计日志、参数脱敏和调用回放。
+不侵入协议，不绑定厂商。
+
+核心形容词：轻量、透明、稳定、安全、好装。
+
+**范围边界（已锁定，不可动摇）**：MCP Arc 只做四件事——① 参数脱敏（含 LLM 兜底）② 调用审计 ③ 回放 / 重放 ④ 限流。嵌入式 Web 控制台仅是这四项的**观测 UI**（看审计、改规则、做回放），不是第五个功能；Docker / 安装脚本 / SSE TLS 属于交付与安全加固，不是产品功能。任何超出此四项的诉求（多租户、策略引擎、分布式部署、告警 webhook、统计面板增强、配置热加载等）均视为偏离，必须先用一句话说明原因并征求确认，不得擅自加入。
+
+# 架构红线（违反任何一条都算偏离）
+
+1. **协议解耦（transport 层方法无关透传）**：只工作在 transport 层，支持 **stdio** 与 **Streamable HTTP** 两种标准传输（旧的 "HTTP+SSE" 传输已被 2026-07-28 规范取代，不再作为目标传输）。**方法无关透传**：原样转发所有 JSON-RPC 方法（tools/call、resources/*、prompts/*、sampling、elicitation、roots、subscriptions、MRTR、progress、cancellation 等），不限于 `tools/call`。仅在需要对 `tools/call` 及 sampling/elicitation 入参做脱敏 / 审计时才解析参数形状，其余照转；不深入解析 MCP payload 内部结构。保持 server 反向请求（sampling / elicitation）与原始 client 请求的关联（遵循 SEP-2260）。MCP spec 变更时核心逻辑不受影响。
+2. **零侵入**：client 和 server 都不需要修改。对 client 来说 mcp-arc 就是 server，对 server 来说 mcp-arc 就是 client。
+3. **低依赖**：默认 SQLite，可选 PostgreSQL。单二进制分发（Vue3 面板通过 //go:embed 打包）。
+4. **配置驱动**：行为由 YAML 控制，不硬编码业务逻辑。

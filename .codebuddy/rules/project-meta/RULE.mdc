@@ -1,0 +1,27 @@
+---
+description: 品牌命名（MCP Arc / mcp-arc，清除 MCPGW/mcpgw）、仓库地址、以及 AI 协助时的偏离提醒策略。
+alwaysApply: false
+enabled: true
+updatedAt: 2026-09-21T09:00:00.000Z
+provider:
+---
+
+# 品牌与命名
+
+- 项目名：MCP Arc
+- Repo：mcp-arc
+- CLI 命令：mcp-arc
+- 二进制：mcp-arc
+- 所有旧名称（MCPGW / mcpgw）必须清除，新代码不得出现
+
+# 仓库
+
+https://github.com/wangzeyud/MCP-Arc
+
+# 当我请求帮助时
+
+- 如果我的请求偏离核心定位（轻量、透明、稳定、安全、好装），直接告诉我。
+- 如果某个功能应该推迟到后续版本，说明原因并建议版本号。
+- 如果发现现有代码违反架构红线，指出并给出重构方案。
+- 生成的代码应该能直接编译运行，不留 TODO（除非我明确要求）。
+- 如果我在某版本阶段要求做后续版本才该做的事（如安装脚本 / TLS），提醒我当前优先级。

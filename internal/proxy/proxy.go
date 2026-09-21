@@ -31,8 +31,8 @@ type Options struct {
 	UpstreamCmd []string
 	Config      *config.Config
 	// SSEURL / ConsoleURL are the effective (possibly auto-adjusted) addresses
-	// surfaced in the console. SSEURL is empty when the client transport is not
-	// "sse".
+	// surfaced in the console. SSEURL holds the client endpoint (SSE or
+	// Streamable HTTP); it is empty only when the client transport is "stdio".
 	SSEURL     string
 	ConsoleURL string
 }
@@ -46,8 +46,9 @@ type Proxy struct {
 	limiter     *ratelimit.TokenBucketManager
 	clientID    string
 
-	upstreamWriter  func([]byte) error
-	clientBroadcast func([]byte) error
+	upstreamWriter   func([]byte) error
+	upstreamInstance  transport.UpstreamTransporter // live upstream, for per-request cancel
+	clientBroadcast   func([]byte) error
 
 	mu         sync.Mutex
 	upstreamMu sync.RWMutex
@@ -133,6 +134,14 @@ func (p *Proxy) run(parent context.Context) error {
 		upstreamFactory = func() (transport.UpstreamTransporter, error) {
 			return transport.NewSSEUpstream(url), nil
 		}
+	case "streamable-http":
+		if p.opts.Config.Transport.UpstreamURL == "" {
+			return errors.New("transport.upstream_url is required when upstream = streamable-http")
+		}
+		url := p.opts.Config.Transport.UpstreamURL
+		upstreamFactory = func() (transport.UpstreamTransporter, error) {
+			return transport.NewStreamableHTTPUpstream(url), nil
+		}
 	default: // stdio
 		if len(p.opts.UpstreamCmd) == 0 {
 			return errors.New("no upstream command provided")
@@ -149,14 +158,20 @@ func (p *Proxy) run(parent context.Context) error {
 	case "sse":
 		client = transport.NewSSEServer(p.opts.Config.Transport.Listen)
 		log.Printf("mcp-arc: SSE client transport listening on %s", p.opts.Config.Transport.Listen)
+	case "streamable-http":
+		client = transport.NewStreamableHTTPClient(p.opts.Config.Transport.Listen, p.opts.Config.Transport.StreamableHTTPPath)
+		log.Printf("mcp-arc: Streamable HTTP client transport listening on %s%s", p.opts.Config.Transport.Listen, p.opts.Config.Transport.StreamableHTTPPath)
 	default: // stdio
 		client = transport.StdioClient{}
 	}
 
 	// broadcast target for upstream-initiated notifications
-	if sse, ok := client.(*transport.SSEServer); ok {
-		p.clientBroadcast = sse.Broadcast
-	} else {
+	switch c := client.(type) {
+	case *transport.SSEServer:
+		p.clientBroadcast = c.Broadcast
+	case *transport.StreamableHTTPClient:
+		p.clientBroadcast = c.Broadcast
+	default:
 		p.clientBroadcast = transport.StdioClient{}.Broadcast
 	}
 
@@ -181,8 +196,8 @@ func (p *Proxy) run(parent context.Context) error {
 
 	errCh := make(chan error, 1)
 	go func() {
-		if e := client.Run(ctx, func(raw []byte, respond func([]byte) error) {
-			p.handleClientMessage(raw, respond)
+		if e := client.Run(ctx, func(raw []byte, respond func([]byte, bool) error) func() {
+			return p.handleClientMessage(raw, respond)
 		}); e != nil {
 			errCh <- e
 		} else {
@@ -225,25 +240,61 @@ func (p *Proxy) run(parent context.Context) error {
 	return nil
 }
 
-func (p *Proxy) handleClientMessage(raw []byte, respond func([]byte) error) {
+// handleClientMessage processes one client frame (rate limit, mask, audit, id
+// rewrite, forward) and returns a cleanup function. The client transport invokes
+// cleanup when this client connection closes (disconnect or stream completion).
+// On a real request the cleanup cancels the in-flight upstream request so a
+// client that walks away mid-call does not leave the upstream server hanging
+// (T5: cancellation propagation).
+//
+// The upstream write is performed asynchronously: it can block for the full
+// duration of a long-running tool, and we must return promptly so the client
+// transport can observe a client disconnect (and invoke cleanup) instead of
+// being stuck behind the in-flight upstream request.
+func (p *Proxy) handleClientMessage(raw []byte, respond func([]byte, bool) error) func() {
 	forward, synthetic := p.processClientMessage(raw, respond)
 	if synthetic != nil {
-		_ = respond(synthetic)
-	} else if forward != nil {
-		if err := p.writeUpstream(forward); err != nil {
-			log.Printf("warn: upstream write failed: %v", err)
-			// Tell the client exactly what went wrong instead of leaving it to
-			// hang until the 5-minute sweep.
-			if id, ok := extractMsgID(raw); ok {
-				_ = respond(jsonRPCError(id, upstreamWriteFailedCode, "upstream write failed: "+err.Error()))
-			}
-			// The request never left the proxy, so drop its correlation entry
-			// rather than let it linger for the sweep and double-respond later.
-			if key, ok := pendingKey(forward); ok {
-				p.dropPending(key)
-			}
+		_ = respond(synthetic, true)
+		return func() {}
+	}
+
+	// Recover the gateway-unique correlation id from the forwarded frame so we can
+	// cancel the matching upstream request if the client disconnects. A nil/empty
+	// id means this was a notification or a failed-rate-limit reply — nothing to
+	// cancel.
+	upID := ""
+	if id, ok := extractMsgID(forward); ok {
+		var s string
+		if err := json.Unmarshal(id, &s); err == nil {
+			upID = s
 		}
 	}
+	cleanup := func() {
+		if upID == "" {
+			return
+		}
+		p.cancelUpstream(upID)
+		p.dropPending(upID)
+	}
+
+	if forward != nil {
+		go func() {
+			if err := p.writeUpstream(forward); err != nil {
+				log.Printf("warn: upstream write failed: %v", err)
+				// Tell the client exactly what went wrong instead of leaving it to
+				// hang until the 5-minute sweep.
+				if id, ok := extractMsgID(raw); ok {
+					_ = respond(jsonRPCError(id, upstreamWriteFailedCode, "upstream write failed: "+err.Error()), true)
+				}
+				// The request never left the proxy, so drop its correlation entry
+				// rather than let it linger for the sweep and double-respond later.
+				if key, ok := pendingKey(forward); ok {
+					p.dropPending(key)
+				}
+			}
+		}()
+	}
+	return cleanup
 }
 
 // Replay re-issues a previously recorded tools/call to the upstream server using
@@ -269,7 +320,7 @@ func (p *Proxy) Replay(ctx context.Context, toolName string, rawParams []byte) (
 		toolName:  toolName,
 		start:     now,
 		deadline:  now.Add(pendingTTL),
-		respond:   func(b []byte) error { ch <- b; return nil },
+		respond:   func(b []byte, _ bool) error { ch <- b; return nil },
 		origIDRaw: json.RawMessage(fmt.Sprintf("%q", upID)),
 	}
 	if p.masker != nil {

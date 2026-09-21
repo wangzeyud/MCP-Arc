@@ -32,7 +32,7 @@ func NewSSEServer(listen string) *SSEServer {
 	return &SSEServer{listen: listen, sessions: map[string]*sseSession{}}
 }
 
-func (s *SSEServer) Run(ctx context.Context, onMessage func([]byte, func([]byte) error)) error {
+func (s *SSEServer) Run(ctx context.Context, onMessage func([]byte, func([]byte, bool) error) func()) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/sse", func(w http.ResponseWriter, r *http.Request) {
 		s.handleSSE(w, r, ctx, onMessage)
@@ -48,7 +48,7 @@ func (s *SSEServer) Run(ctx context.Context, onMessage func([]byte, func([]byte)
 	return s.srv.ListenAndServe()
 }
 
-func (s *SSEServer) handleSSE(w http.ResponseWriter, r *http.Request, ctx context.Context, onMessage func([]byte, func([]byte) error)) {
+func (s *SSEServer) handleSSE(w http.ResponseWriter, r *http.Request, ctx context.Context, onMessage func([]byte, func([]byte, bool) error) func()) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
@@ -103,7 +103,7 @@ func (s *SSEServer) handleSSE(w http.ResponseWriter, r *http.Request, ctx contex
 	<-r.Context().Done()
 }
 
-func (s *SSEServer) handleMessages(w http.ResponseWriter, r *http.Request, onMessage func([]byte, func([]byte) error)) {
+func (s *SSEServer) handleMessages(w http.ResponseWriter, r *http.Request, onMessage func([]byte, func([]byte, bool) error) func()) {
 	sessionID := r.URL.Query().Get("sessionId")
 	if sessionID == "" {
 		http.Error(w, "missing sessionId", http.StatusBadRequest)
@@ -124,7 +124,7 @@ func (s *SSEServer) handleMessages(w http.ResponseWriter, r *http.Request, onMes
 	// respond is bound to the SESSION lifetime (sess.done), NOT the POST request
 	// context — upstream responses are delivered asynchronously, long after this
 	// handler returns, so the POST request context would already be closed.
-	respond := func(b []byte) error {
+	respond := func(b []byte, _ bool) error {
 		select {
 		case sess.ch <- b:
 			return nil

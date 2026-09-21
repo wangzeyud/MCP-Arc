@@ -35,7 +35,7 @@ type collector struct {
 	msgs [][]byte
 }
 
-func (c *collector) respond(b []byte) error {
+func (c *collector) respond(b []byte, _ bool) error {
 	c.msgs = append(c.msgs, b)
 	return nil
 }
@@ -480,7 +480,7 @@ func TestAuditWriteOffloadedAndNonBlocking(t *testing.T) {
 	go p.auditWorker(ctx, make(chan struct{}))
 	defer cancel()
 
-	noOp := func([]byte) error { return nil }
+	noOp := func([]byte, bool) error { return nil }
 
 	// First call: slow insert. The response path must return immediately.
 	p.processClientMessage([]byte(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"slow","arguments":{}}}`), noOp)
@@ -568,10 +568,16 @@ func TestClientGetsClearErrorOnUpstreamWriteFailure(t *testing.T) {
 	p.setUpstreamWriter(func(b []byte) error { return errors.New("connection refused") })
 
 	var got []byte
-	respond := func(b []byte) error { got = b; return nil }
+	respond := func(b []byte, _ bool) error { got = b; return nil }
 	raw := `{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"x","arguments":{}}}`
 	p.handleClientMessage([]byte(raw), respond)
 
+	// handleClientMessage forwards asynchronously now, so the error response may
+	// arrive on a brief delay — wait for it rather than assuming synchrony.
+	deadline := time.Now().Add(time.Second)
+	for got == nil && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
 	if got == nil {
 		t.Fatal("expected a client error response when the upstream write fails")
 	}
@@ -598,5 +604,69 @@ func TestClientGetsClearErrorOnUpstreamWriteFailure(t *testing.T) {
 	p.mu.Unlock()
 	if n != 0 {
 		t.Fatalf("expected pending to be empty after a failed write, got %d", n)
+	}
+}
+
+// An MCP 2026-07-28 InputRequiredResult (MRTR) embeds inputRequests that the
+// client must answer. T6: it must be audited, but its nested sampling/elicitation
+// params must NOT be masked (so the client can actually consume them).
+func TestInputRequiredResultIsAuditedButNotMasked(t *testing.T) {
+	p, store, c := newTestProxy()
+	m, err := mask.New([]mask.Spec{{
+		Name:     "password",
+		Patterns: []string{`^topsecret$`},
+		Fields:   []string{"password"},
+		MaskChar: "[REDACTED]",
+		Enabled:  true,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.masker = m
+	p.auditWrites = true
+
+	p.processClientMessage([]byte(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"ask","arguments":{}}}`), c.respond)
+
+	resp := `{"jsonrpc":"2.0","id":"gw-1","result":{"inputRequests":[{"params":{"password":"topsecret"}}]}}`
+	if err := p.processUpstreamMessage([]byte(resp)); err != nil {
+		t.Fatal(err)
+	}
+	if len(store.records) != 1 {
+		t.Fatalf("audit records = %d, want 1", len(store.records))
+	}
+	rec := store.records[0]
+	if !strings.Contains(rec.RawResult, "topsecret") {
+		t.Errorf("RawResult must preserve inputRequests params, got %q", rec.RawResult)
+	}
+	if !strings.Contains(rec.Result, "topsecret") {
+		t.Errorf("InputRequiredResult must NOT be nested-masked, got %q", rec.Result)
+	}
+}
+
+// T4: an upstream notification carrying a request scope must be routed to the
+// owning client's respond (and have its scope marker stripped) instead of being
+// broadcast to every client.
+func TestUpstreamScopedNotificationRoutedToPending(t *testing.T) {
+	p, _, c := newTestProxy()
+	p.pending["gw-3"] = &pendingCall{respond: c.respond, origIDRaw: json.RawMessage("3")}
+
+	broadcastCalled := false
+	p.clientBroadcast = func(b []byte) error { broadcastCalled = true; return nil }
+
+	notif := []byte(`{"jsonrpc":"2.0","method":"notifications/progress","params":{"pct":50},"__arc_scope__":"gw-3"}`)
+	if err := p.processUpstreamMessage(notif); err != nil {
+		t.Fatal(err)
+	}
+	if broadcastCalled {
+		t.Fatal("request-scoped notification must not be broadcast")
+	}
+	if len(c.msgs) != 1 {
+		t.Fatalf("owning client received %d messages, want 1", len(c.msgs))
+	}
+	if strings.Contains(string(c.msgs[0]), "__arc_scope__") {
+		t.Errorf("scope marker must be stripped before forwarding: %s", c.msgs[0])
+	}
+	if !strings.Contains(string(c.msgs[0]), "notifications/progress") {
+		t.Errorf("expected the progress notification, got %s", c.msgs[0])
 	}
 }

@@ -66,7 +66,7 @@ func TestFailPendingUpstreamDownNotifiesClients(t *testing.T) {
 	p := &Proxy{pending: map[string]*pendingCall{}}
 	var got []byte
 	p.pending["gw-1"] = &pendingCall{
-		respond:   func(b []byte) error { got = b; return nil },
+		respond:   func(b []byte, _ bool) error { got = b; return nil },
 		origIDRaw: json.RawMessage("7"),
 	}
 

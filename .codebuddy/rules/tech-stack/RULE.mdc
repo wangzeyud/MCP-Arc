@@ -1,0 +1,22 @@
+---
+description: 技术栈与依赖红线——Go 1.27、pure-Go SQLite(modernc 无 CGO)、Vue3、YAML 自研加载、Cobra 仅解析；禁止引入 Viper / CGO。
+alwaysApply: true
+enabled: true
+updatedAt: 2026-09-21T09:00:00.000Z
+provider:
+---
+
+# 技术栈
+
+- Go 1.27（proxy 核心 + admin REST API，pure-Go SQLite：**modernc.org/sqlite，无 CGO**）
+- Vue3 + Element Plus（嵌入二进制，通过 //go:embed 打包，单二进制分发）
+- 存储：SQLite（默认）→ PostgreSQL（可选）
+- 配置：YAML（自研 `config.Load()` 加载，**不引入 Viper 自动绑定**）
+- CLI：Cobra（仅用于命令行参数解析，解析后传给业务逻辑；**不引入 Viper**）
+- 传输：**stdio** 与 **Streamable HTTP**（MCP 2026-07-28，单 POST 端点）。旧的 "HTTP+SSE" 适配器保留为 legacy，不再作为目标传输，新部署推荐 Streamable HTTP。
+
+# 依赖红线
+
+- 禁止引入 CGO 依赖（保持 pure-Go、跨平台单二进制）。
+- 禁止引入 Viper；配置加载走自研 `config.Load()`。
+- Cobra 仅做参数解析，不承载业务逻辑。

@@ -1,0 +1,40 @@
+---
+description: Go/Vue3 代码风格与 JetBrains 现代 Go 指南（按 Go 版本惯用法速查、encoding/json/v2 注意事项）。
+alwaysApply: false
+enabled: true
+updatedAt: 2026-09-21T09:00:00.000Z
+provider:
+---
+
+# 代码风格
+
+- Go：标准库优先，显式错误处理，不忽略 error
+- Vue3：Composition API
+- 日志：结构化，级别分明（debug/info/warn/error）
+- 导出的函数/方法必须有注释
+
+# Go 代码规范（JetBrains Modern Go Guidelines）
+
+所有新写的 Go 代码必须遵循 JetBrains 现代 Go 指南：
+https://github.com/JetBrains/go-modern-guidelines
+
+- 以 `go.mod` 的 `go` 指令为准（当前 `go 1.27.0`），只使用该版本及之前引入的语言/标准库特性，不超前。
+- 优先采用现代惯用法；与 Go 团队官方 `modernize` 分析器目标一致（本机网络无法拉取该工具，手动应用）。
+
+## 现代惯用法速查（按引入版本）
+
+- 1.18+：`any` 代替 `interface{}`；`strings.Cut` / `bytes.Cut` 代替 `Index`+手动切片
+- 1.19+：`fmt.Appendf`；类型化原子 `atomic.Bool/Int64` 代替 `int32`+`atomic.StoreInt32`
+- 1.20+：`strings.CutPrefix`/`CutSuffix`；`errors.Join`；`context.WithCancelCause`
+- 1.21+：内建 `min`/`max`；`clear()`；`slices.*`（`Contains/Index/Sort/SortFunc/Max/Min/Reverse/Clone/Compact/Clip`）；`maps.*`（`Clone/Copy/DeleteFunc`）；`sync.OnceFunc`/`OnceValue`；`cmp.Or`；`reflect.TypeFor[T]()`；`context.AfterFunc`
+- 1.22+：`for i := range n` 代替 `for i := 0; i < n; i++`；闭包/goroutine 内无需 `v := v` 拷贝；`http.ServeMux` 模式 `GET /api/{id}` + `r.PathValue`
+- 1.23+：`maps.Keys/Values` 直接迭代；`slices.Collect`/`slices.Sorted`；`strings.SplitSeq`/`bytes.FieldsSeq`
+- 1.24+：测试用 `t.Context()`；`json` 字段 `omitzero` 代替 `omitempty`；`testing.B.Loop()`
+- 1.25+：`sync.WaitGroup.Go(func())`
+- 1.26+：`new(42)` 代替取地址辅助函数；`errors.AsType[*T](err)`
+- 1.27+：泛型方法 `func (s Set[T]) Map[U any](...)`；`strings.CutLast`/`bytes.CutLast`；标准库 `uuid` 代替 `github.com/google/uuid`；`url.Clone()`
+
+## 注意事项
+
+- `encoding/json/v2` 会改变序列化语义（nil slice/map 输出 `[]`/`{}` 而非 `null`），影响审计 API 的 JSON 输出，**仅在确认无兼容问题或全新代码时采用**。
+- `generic_methods`、`stdlib_uuid` 属结构性改动，应用前需评估影响。

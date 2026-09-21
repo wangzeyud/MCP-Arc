@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/wangzeyud/mcp-arc/internal/audit"
+	"github.com/wangzeyud/mcp-arc/internal/transport"
 )
 
 const (
@@ -32,7 +33,7 @@ type pendingCall struct {
 	rawParams    string
 	start        time.Time
 	deadline     time.Time
-	respond      func([]byte) error
+	respond      func([]byte, bool) error
 	origIDRaw    json.RawMessage
 }
 
@@ -66,7 +67,7 @@ func decodeJSONObject(raw []byte) (map[string]any, error) {
 // to a gateway-unique value for correlation/routing across concurrent sessions,
 // and returns the bytes to forward upstream. On rate limiting it returns a
 // synthetic error to send back to the client instead.
-func (p *Proxy) processClientMessage(raw []byte, respond func([]byte) error) (forward []byte, synthetic []byte) {
+func (p *Proxy) processClientMessage(raw []byte, respond func([]byte, bool) error) (forward []byte, synthetic []byte) {
 	msg, err := decodeJSONObject(raw)
 	if err != nil {
 		return raw, nil // not JSON-RPC, pass through untouched
@@ -130,9 +131,33 @@ func (p *Proxy) processUpstreamMessage(raw []byte) error {
 	if err != nil {
 		return nil
 	}
+
+	// Request-scoped upstream notification (Streamable HTTP): the StreamableHTTP
+	// upstream tagged it with the owning request id so we can route it to that
+	// client's stream instead of broadcasting. Strip the marker before forwarding;
+	// it must never reach the client.
+	if scope, ok := msg[transport.ArcScopeKey].(string); ok && scope != "" {
+		p.mu.Lock()
+		pc, ok := p.pending[scope]
+		p.mu.Unlock()
+		if !ok {
+			return nil
+		}
+		delete(msg, transport.ArcScopeKey)
+		scoped, err := json.Marshal(msg)
+		if err != nil {
+			return nil
+		}
+		if err := pc.respond(scoped, false); err != nil {
+			// client stream gone: propagate cancellation upstream
+			p.cancelUpstream(scope)
+		}
+		return nil
+	}
+
 	id, ok := msg["id"]
 	if !ok {
-		// upstream-initiated notification: broadcast to all clients
+		// upstream-initiated broadcast notification (legacy SSE/stdio paths)
 		return p.clientBroadcast(raw)
 	}
 	key := fmt.Sprintf("%v", id)
@@ -167,7 +192,11 @@ func (p *Proxy) processUpstreamMessage(raw []byte) error {
 		resultBytes := []byte("null")
 		if result != nil {
 			if p.masker != nil {
-				if rm, ok := result.(map[string]any); ok {
+				// An InputRequiredResult (MCP 2026-07-28 MRTR) embeds
+				// inputRequests (sampling/elicitation params) the client must
+				// answer. Per the v0.5 plan we audit it but do NOT apply nested
+				// masking to those params, so we leave the result intact.
+				if rm, ok := result.(map[string]any); ok && !isInputRequiredResult(rm) {
 					if masked, err := p.masker.MaskResult(rm); err == nil && masked != nil {
 						result = masked
 					}
@@ -191,7 +220,27 @@ func (p *Proxy) processUpstreamMessage(raw []byte) error {
 		}
 	}
 
-	return pc.respond(outRaw)
+	if err := pc.respond(outRaw, true); err != nil {
+		// client stream gone: propagate cancellation upstream
+		p.cancelUpstream(key)
+	}
+	return nil
+}
+
+// isInputRequiredResult reports whether a tool result is an MCP 2026-07-28
+// InputRequiredResult (MRTR): it carries inputRequests the client must answer.
+// When true, the proxy audits the result but skips nested masking of the
+// embedded sampling/elicitation params (v0.5 plan: audit-only for now).
+func isInputRequiredResult(result map[string]any) bool {
+	if _, ok := result["inputRequests"]; ok {
+		return true
+	}
+	if sc, ok := result["structuredContent"].(map[string]any); ok {
+		if t, ok := sc["type"].(string); ok && t == "InputRequiredResult" {
+			return true
+		}
+	}
+	return false
 }
 
 // sweepPending reaps pending calls whose upstream never answered, until ctx is
@@ -240,7 +289,7 @@ func (p *Proxy) reapPending(now time.Time) {
 		if err != nil {
 			continue
 		}
-		_ = pc.respond(resp)
+		_ = pc.respond(resp, true)
 	}
 }
 

@@ -34,6 +34,35 @@ func (p *Proxy) setUpstreamWriter(w func([]byte) error) {
 	p.upstreamMu.Unlock()
 }
 
+// setUpstreamInstance records the live upstream transporter so per-request
+// cancellation (e.g. cancelling the upstream POST when a client disconnects) can
+// reach transport-specific methods like StreamableHTTPUpstream.Cancel.
+func (p *Proxy) setUpstreamInstance(u transport.UpstreamTransporter) {
+	p.upstreamMu.Lock()
+	p.upstreamInstance = u
+	p.upstreamMu.Unlock()
+}
+
+func (p *Proxy) getUpstreamInstance() transport.UpstreamTransporter {
+	p.upstreamMu.RLock()
+	u := p.upstreamInstance
+	p.upstreamMu.RUnlock()
+	return u
+}
+
+// cancelUpstream aborts an in-flight upstream request if the current upstream
+// supports per-request cancellation. Used to propagate a client disconnect
+// (respond failure) upstream so a hung server request is torn down promptly.
+func (p *Proxy) cancelUpstream(id string) {
+	u := p.getUpstreamInstance()
+	if u == nil {
+		return
+	}
+	if c, ok := u.(interface{ Cancel(string) }); ok {
+		c.Cancel(id)
+	}
+}
+
 // getUpstreamWriter returns the current upstream writer (or nil) under lock.
 func (p *Proxy) getUpstreamWriter() func([]byte) error {
 	p.upstreamMu.RLock()
@@ -69,10 +98,12 @@ func (p *Proxy) upstreamSupervisor(ctx context.Context, factory func() (transpor
 			log.Printf("warn: upstream start failed: %v (retry in %s)", err, backoff)
 		} else {
 			p.setUpstreamWriter(up.Write)
+			p.setUpstreamInstance(up)
 			log.Printf("mcp-arc: upstream connected")
 			runErr := up.Run(ctx, p.onUpstreamMessage)
 			_ = up.Close()
 			p.setUpstreamWriter(nil)
+			p.setUpstreamInstance(nil)
 			// The upstream went away: fail any requests it was handling so the
 			// client gets a clear error instead of a 5-minute hang.
 			p.failPendingUpstreamDown()
@@ -117,7 +148,7 @@ func (p *Proxy) failPendingUpstreamDown() {
 		if pc.respond == nil {
 			continue
 		}
-		_ = pc.respond(jsonRPCError(pc.origIDRaw, upstreamDownCode, "upstream disconnected"))
+		_ = pc.respond(jsonRPCError(pc.origIDRaw, upstreamDownCode, "upstream disconnected"), true)
 	}
 }
 

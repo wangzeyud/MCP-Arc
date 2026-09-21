@@ -24,7 +24,7 @@ above — not a fifth feature. Rules are hot-reloaded; audit records exportable 
 
 ## Design
 
-- Works at the **transport layer** (stdio / SSE), not inside the protocol.
+- Works at the **transport layer** (stdio / Streamable HTTP / SSE-legacy), not inside the protocol.
 - Only MCP knowledge used: the `tools/call` method and the `params.{name,arguments}` shape.
 - Requests are correlated by rewriting the JSON-RPC `id` and restoring it on the
   way back; responses are **matched**, not parsed. Untouched messages forward byte-for-byte.
@@ -71,9 +71,11 @@ curl -H "Authorization: Bearer change-me" localhost:8080/api/stats
 | `transport.client` | `transport.upstream` | scenario |
 |---|---|---|
 | `stdio` (default) | `stdio` (default) | local transparent proxy |
-| `sse` | `stdio` | **gateway mode** — remote clients over HTTP, Arc fronts a local stdio server |
+| `sse` | `stdio` | **gateway mode** — remote clients over HTTP, Arc fronts a local stdio server (SSE is legacy; Streamable HTTP preferred) |
 | `sse` | `sse` | fully remote |
 | `stdio` | `sse` | local client → remote SSE server |
+| `streamable-http` | `streamable-http` | remote client & server over a single POST endpoint (MCP 2026-07-28) |
+| `streamable-http` | `stdio` | remote clients over Streamable HTTP → local stdio server |
 
 ```yaml
 server:
@@ -85,7 +87,7 @@ transport:
 ```
 Clients connect to `http://host:8081/sse`.
 
-CLI flags: `--config`, `--upstream`, `--client-transport` (`stdio`|`sse`), `--listen`, `--upstream-transport` (`stdio`|`sse`), `--upstream-url`.
+CLI flags: `--config`, `--upstream`, `--client-transport` (`stdio`|`sse`|`streamable-http`), `--listen`, `--upstream-transport` (`stdio`|`sse`|`streamable-http`), `--upstream-url`.
 
 ## Wiring into a real client
 
@@ -213,6 +215,13 @@ Rides the same id-rewrite / response-correlation machinery as a live call (stdio
 
 ## Changelog
 
+### v0.5 — spec alignment (MCP 2026-07-28)
+- **Streamable HTTP transport** — single POST endpoint for both client and upstream (`transport.client` / `transport.upstream: streamable-http`), matching the 2026-07-28 spec. The older HTTP+SSE adapter is retained as `sse` and marked **legacy**; Streamable HTTP is recommended for new deployments.
+- **Method-agnostic passthrough** — forwards all JSON-RPC methods (tools/*, resources/*, prompts/*, sampling, elicitation, roots, subscriptions, MRTR, progress, cancellation, …) unchanged; only `tools/call` (and sampling/elicitation) params are inspected for masking/audit.
+- **Notification scoping & cancellation propagation (T4–T5)** — stream-scoped notifications route to the owning request instead of being broadcast to every client; a client disconnect now actively cancels the in-flight upstream request. Verified by the proxy-level E2E test `TestE2EStreamableHTTPProxyCancelOnClientDisconnect`.
+- **`InputRequiredResult` audit** — audited without nested masking.
+- Transport unit tests + soak variant; SSE marked legacy.
+
 ### v0.4 — stability / soak testing
 - **Soak stability test** — `TestProxySoakStability` drives 20k proxy round-trips, asserting zero pending-request leaks, audit-count consistency, and bounded goroutine growth.
 - **Race verification** — full `go test -race ./...` passes with no data races across proxy / mask / audit / admin / llm.
@@ -231,6 +240,7 @@ Rides the same id-rewrite / response-correlation machinery as a live call (stdio
 - **v0.2** ✅ LLM-assisted masking, rule CRUD in the console, JSON / CSV export.
 - **v0.3** ✅ stability and production readiness: preset templates, async/timeout-bounded audit writes, upstream reconnect, replay UI, graceful shutdown.
 - **v0.4** ✅ — stability / soak testing + race verification (internal quality; no new features).
+- **v0.5** ✅ — spec alignment (MCP 2026-07-28): Streamable HTTP transport, method-agnostic passthrough, notification scoping & cancellation propagation (client disconnect cancels in-flight upstream), `InputRequiredResult` audit; SSE marked legacy.
 
 ## License
 MIT — see [LICENSE](./LICENSE).

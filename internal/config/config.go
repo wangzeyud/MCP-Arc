@@ -24,12 +24,14 @@ type ServerConfig struct {
 
 // TransportConfig selects how MCP Arc talks to the MCP client and to the upstream
 // MCP server. "stdio" spawns/uses a subprocess; "sse" uses HTTP Server-Sent
-// Events (the MCP remote transport).
+// Events (the legacy MCP remote transport); "streamable-http" uses the MCP
+// 2026-07-28 Streamable HTTP transport (single POST endpoint).
 type TransportConfig struct {
-	Client      string `yaml:"client"`       // stdio | sse  (how clients connect to MCP Arc)
-	Listen      string `yaml:"listen"`       // address for the SSE server, e.g. ":8081"
-	Upstream    string `yaml:"upstream"`     // stdio | sse  (how MCP Arc connects to the real server)
-	UpstreamURL string `yaml:"upstream_url"` // the upstream /sse endpoint, when upstream = sse
+	Client      string `yaml:"client"`       // stdio | sse | streamable-http  (how clients connect to MCP Arc)
+	Listen      string `yaml:"listen"`       // address for the HTTP client transports, e.g. ":8081"
+	Upstream    string `yaml:"upstream"`     // stdio | sse | streamable-http  (how MCP Arc connects to the real server)
+	UpstreamURL string `yaml:"upstream_url"` // the upstream /sse or /mcp endpoint, when upstream = sse | streamable-http
+	StreamableHTTPPath string `yaml:"streamable_http.path"` // client endpoint path for streamable-http, default /mcp
 }
 
 type AuditConfig struct {
@@ -144,6 +146,9 @@ func applyDefaults(c *Config) {
 	}
 	if c.Transport.Listen == "" {
 		c.Transport.Listen = ":8081"
+	}
+	if c.Transport.StreamableHTTPPath == "" {
+		c.Transport.StreamableHTTPPath = "/mcp"
 	}
 	if c.Transport.Upstream == "" {
 		c.Transport.Upstream = "stdio"
