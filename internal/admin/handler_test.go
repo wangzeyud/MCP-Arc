@@ -14,17 +14,24 @@ import (
 )
 
 // fakeReplayer captures the args handed to Replay so tests can assert the
-// handler forwards the recorded tool name and raw params verbatim.
+// handler forwards the recorded tool name and raw params verbatim. If respondFor
+// maps a tool name to an error, that error is returned for that tool.
 type fakeReplayer struct {
-	tool   string
-	params string
-	resp   []byte
-	err    error
+	tool      string
+	params    string
+	resp      []byte
+	err       error
+	respondFor map[string]error
 }
 
 func (f *fakeReplayer) Replay(_ context.Context, toolName string, rawParams []byte) ([]byte, error) {
 	f.tool = toolName
 	f.params = string(rawParams)
+	if f.respondFor != nil {
+		if e, ok := f.respondFor[toolName]; ok {
+			return nil, e
+		}
+	}
 	return f.resp, f.err
 }
 
@@ -109,11 +116,12 @@ func insertAndID(t *testing.T, s *Server, rec *audit.CallRecord) int64 {
 	if err := s.store.Insert(rec); err != nil {
 		t.Fatalf("insert: %v", err)
 	}
-	recs, err := s.store.Query(audit.QueryOpts{Limit: 1})
-	if err != nil || len(recs) == 0 {
-		t.Fatalf("query after insert: %v", err)
+	// The store assigns the id on insert; return it directly rather than
+	// re-querying, since the fake store's map iteration order is non-deterministic.
+	if rec.ID == 0 {
+		t.Fatalf("store did not assign an id")
 	}
-	return recs[0].ID
+	return rec.ID
 }
 
 // The handler re-issues the recorded call with the original (unmasked) params and
@@ -180,5 +188,165 @@ func TestHandleReplayUpstreamError(t *testing.T) {
 	id := insertAndID(t, s, &audit.CallRecord{ClientID: "c", ToolName: "t", RawParams: `{}`})
 	if rr := doReplay(t, s, id); rr.Code != http.StatusBadGateway {
 		t.Fatalf("status = %d, want 502 (body=%s)", rr.Code, rr.Body.String())
+	}
+}
+
+func doReplayBatch(t *testing.T, s *Server, body any) *httptest.ResponseRecorder {
+	t.Helper()
+	b, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/replay/batch", bytes.NewReader(b))
+	rec := httptest.NewRecorder()
+	s.handleReplayBatch(rec, req)
+	return rec
+}
+
+type batchItem struct {
+	CallID   int64           `json:"call_id"`
+	Tool     string          `json:"tool"`
+	Status   string          `json:"status"`
+	Response json.RawMessage `json:"response"`
+	Error    string          `json:"error"`
+	Diff     *struct {
+		Mode  string `json:"mode"`
+		Match bool   `json:"match"`
+	} `json:"diff"`
+}
+
+func decodeBatch(t *testing.T, rr *httptest.ResponseRecorder) []batchItem {
+	t.Helper()
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+	var out struct {
+		Results []batchItem `json:"results"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode: %v (body=%s)", err, rr.Body.String())
+	}
+	return out.Results
+}
+
+// Batch replay by explicit ids reuses the same upstream path and returns one
+// result per call.
+func TestHandleReplayBatchByIDs(t *testing.T) {
+	rp := &fakeReplayer{resp: []byte(`{"result":"ok"}`)}
+	s, closeFn := newTestServer(t, rp)
+	defer closeFn()
+	id1 := insertAndID(t, s, &audit.CallRecord{ClientID: "c", ToolName: "a", RawParams: `{"x":1}`})
+	id2 := insertAndID(t, s, &audit.CallRecord{ClientID: "c", ToolName: "b", RawParams: `{"y":2}`})
+
+	rr := doReplayBatch(t, s, map[string]any{"call_ids": []int64{id1, id2}})
+	items := decodeBatch(t, rr)
+	if len(items) != 2 {
+		t.Fatalf("items = %d, want 2", len(items))
+	}
+	if items[0].Status != "ok" || items[1].Status != "ok" {
+		t.Fatalf("statuses = %q/%q, want ok/ok", items[0].Status, items[1].Status)
+	}
+	if items[0].Tool != "a" || items[1].Tool != "b" {
+		t.Fatalf("tools = %q/%q", items[0].Tool, items[1].Tool)
+	}
+	if string(items[0].Response) != `{"result":"ok"}` {
+		t.Fatalf("response[0] = %s", items[0].Response)
+	}
+}
+
+// Filter mode resolves the id list from the store before replaying.
+func TestHandleReplayBatchFilter(t *testing.T) {
+	rp := &fakeReplayer{resp: []byte(`{"ok":true}`)}
+	s, closeFn := newTestServer(t, rp)
+	defer closeFn()
+	insertAndID(t, s, &audit.CallRecord{ClientID: "c", ToolName: "a", RawParams: `{}`})
+	insertAndID(t, s, &audit.CallRecord{ClientID: "c", ToolName: "a", RawParams: `{}`})
+	insertAndID(t, s, &audit.CallRecord{ClientID: "c", ToolName: "other", RawParams: `{}`})
+
+	rr := doReplayBatch(t, s, map[string]any{"filter": map[string]any{"tool": "a"}})
+	items := decodeBatch(t, rr)
+	if len(items) != 2 {
+		t.Fatalf("items = %d, want 2 (filter tool=a)", len(items))
+	}
+	for _, it := range items {
+		if it.Tool != "a" {
+			t.Fatalf("filtered tool = %q, want a", it.Tool)
+		}
+	}
+}
+
+// Diff reports whether the replayed response still matches the recorded raw_result.
+func TestHandleReplayBatchDiff(t *testing.T) {
+	// Replay returns the full JSON-RPC envelope in production; mirror that here so
+	// we exercise the unwrap-to-result comparison.
+	rp := &fakeReplayer{resp: []byte(`{"jsonrpc":"2.0","id":"gw-1","result":{"r":1}}`)}
+	s, closeFn := newTestServer(t, rp)
+	defer closeFn()
+	// matches recorded raw_result -> diff.match true
+	idMatch := insertAndID(t, s, &audit.CallRecord{ClientID: "c", ToolName: "a", RawParams: `{}`, RawResult: `{"r":1}`})
+	// differs -> diff.match false
+	idDiff := insertAndID(t, s, &audit.CallRecord{ClientID: "c", ToolName: "b", RawParams: `{}`, RawResult: `{"r":2}`})
+
+	rr := doReplayBatch(t, s, map[string]any{"call_ids": []int64{idMatch, idDiff}, "diff": true})
+	items := decodeBatch(t, rr)
+	if len(items) != 2 {
+		t.Fatalf("items = %d, want 2", len(items))
+	}
+	if items[0].Diff == nil || !items[0].Diff.Match {
+		t.Fatalf("item0 diff = %+v, want match=true", items[0].Diff)
+	}
+	if items[1].Diff == nil || items[1].Diff.Match {
+		t.Fatalf("item1 diff = %+v, want match=false", items[1].Diff)
+	}
+}
+
+// computeDiff must compare the inner result payload, not the JSON-RPC envelope:
+// Replay returns {"jsonrpc","id","result":...} but RawResult stores only the
+// result object. Regression test for "diff always shows changed".
+func TestComputeDiffUnwrapsEnvelope(t *testing.T) {
+	cases := []struct {
+		name string
+		got  string // what Replay returns (full envelope)
+		want string // recorded RawResult (result object)
+		match bool
+	}{
+		{"matching result object", `{"jsonrpc":"2.0","id":"gw-1","result":{"content":[{"type":"text","text":"ok"}]}}`, `{"content":[{"type":"text","text":"ok"}]}`, true},
+		{"id differs but result same -> match", `{"jsonrpc":"2.0","id":"gw-9","result":{"x":1}}`, `{"x":1}`, true},
+		{"result differs -> no match", `{"jsonrpc":"2.0","id":"gw-1","result":{"x":2}}`, `{"x":1}`, false},
+		{"error payload compared", `{"jsonrpc":"2.0","id":"gw-1","error":{"code":-32000,"message":"boom"}}`, `{"code":-32000,"message":"boom"}`, true},
+		{"non-envelope passthrough", `{"foo":"bar"}`, `{"foo":"bar"}`, true},
+	}
+	for _, c := range cases {
+		d := computeDiff([]byte(c.got), []byte(c.want))
+		if d.Mode != "exact" {
+			t.Fatalf("%s: mode = %q, want exact", c.name, d.Mode)
+		}
+		if d.Match != c.match {
+			t.Fatalf("%s: match = %v, want %v", c.name, d.Match, c.match)
+		}
+	}
+}
+
+// A call with no recorded params is skipped (not errored); an upstream failure on
+// one call does not abort the others.
+func TestHandleReplayBatchPartialFailure(t *testing.T) {
+	rp := &fakeReplayer{resp: []byte(`{"ok":true}`), err: errors.New("boom")}
+	s, closeFn := newTestServer(t, rp)
+	defer closeFn()
+	idNoParams := insertAndID(t, s, &audit.CallRecord{ClientID: "c", ToolName: "a", RawParams: ""})
+	idFail := insertAndID(t, s, &audit.CallRecord{ClientID: "c", ToolName: "b", RawParams: `{}`})
+
+	// Make the replayer return an error for "b" specifically.
+	rp.respondFor = map[string]error{"b": errors.New("boom")}
+	rr := doReplayBatch(t, s, map[string]any{"call_ids": []int64{idNoParams, idFail}})
+	items := decodeBatch(t, rr)
+	if len(items) != 2 {
+		t.Fatalf("items = %d, want 2", len(items))
+	}
+	if items[0].Status != "skipped" {
+		t.Fatalf("item0 status = %q, want skipped", items[0].Status)
+	}
+	if items[1].Status != "error" || items[1].Error != "boom" {
+		t.Fatalf("item1 = %+v, want error/boom", items[1])
 	}
 }

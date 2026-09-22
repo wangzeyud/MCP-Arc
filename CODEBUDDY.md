@@ -14,7 +14,7 @@ MCP Arc 是轻量的 MCP Proxy / Sidecar，位于 MCP client 与 server 之间�
 | 开发纪律（单职责 / 轻量 / 兼容 / 测试 / 降级） | `.codebuddy/rules/dev-discipline/RULE.mdc` | always |
 | 技术栈与依赖红线（Go 1.27、pure-Go SQLite、禁 Viper/CGO） | `.codebuddy/rules/tech-stack/RULE.mdc` | always |
 | 代码风格与 JetBrains 现代 Go 指南 | `.codebuddy/rules/code-style/RULE.mdc` | agent-requested |
-| 版本进度（v0.1–v0.5） | `.codebuddy/rules/progress/RULE.mdc` | agent-requested |
+| 版本进度（v0.1–v0.6） | `.codebuddy/rules/progress/RULE.mdc` | agent-requested |
 | 品牌命名、仓库、协作提醒策略 | `.codebuddy/rules/project-meta/RULE.mdc` | agent-requested |
 
 ## 仓库

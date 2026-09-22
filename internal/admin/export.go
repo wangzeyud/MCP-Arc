@@ -22,6 +22,7 @@ type exportRecord struct {
 	ErrorMsg  string    `json:"error_msg"`
 	LatencyMs int64     `json:"latency_ms"`
 	Timestamp time.Time `json:"timestamp"`
+	ReplayOf  int64     `json:"replay_of,omitempty"`
 	RawParams *string   `json:"raw_params,omitempty"`
 	RawResult *string   `json:"raw_result,omitempty"`
 }
@@ -67,6 +68,7 @@ func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
 			ErrorMsg:  rec.ErrorMsg,
 			LatencyMs: rec.LatencyMs,
 			Timestamp: rec.Timestamp,
+			ReplayOf:  rec.ReplayOf,
 		}
 		if includeRaw {
 			e.RawParams = &rec.RawParams
@@ -94,7 +96,7 @@ func (s *Server) handleExport(w http.ResponseWriter, r *http.Request) {
 func writeCSV(w http.ResponseWriter, rows []exportRecord, includeRaw bool) {
 	writer := csv.NewWriter(w)
 	defer writer.Flush()
-	header := []string{"id", "client_id", "tool_name", "params", "result", "error_msg", "latency_ms", "timestamp"}
+	header := []string{"id", "client_id", "tool_name", "params", "result", "error_msg", "latency_ms", "timestamp", "replay_of"}
 	if includeRaw {
 		header = append(header, "raw_params", "raw_result")
 	}
@@ -109,6 +111,7 @@ func writeCSV(w http.ResponseWriter, rows []exportRecord, includeRaw bool) {
 			r.ErrorMsg,
 			strconv.FormatInt(r.LatencyMs, 10),
 			r.Timestamp.Format(time.RFC3339),
+			strconv.FormatInt(r.ReplayOf, 10),
 		}
 		if includeRaw {
 			line = append(line, deref(r.RawParams), deref(r.RawResult))

@@ -71,15 +71,39 @@ func (p *Proxy) getUpstreamWriter() func([]byte) error {
 	return w
 }
 
-// writeUpstream forwards a frame to the upstream, returning a clear error when no
-// connection is established. It never blocks on a dead upstream: during a reconnect
-// gap the writer is nil and this returns immediately.
+// writeUpstream forwards a frame to the upstream. When no upstream is connected
+// it fails fast — unless the upstream has never connected yet, in which case it
+// waits (bounded) for the first connect so a client that initializes immediately
+// is not rejected by a startup race.
 func (p *Proxy) writeUpstream(b []byte) error {
-	w := p.getUpstreamWriter()
-	if w == nil {
+	if w := p.getUpstreamWriter(); w != nil {
+		return w(b)
+	}
+	// Already connected once, or built without a readiness channel (tests):
+	// a reconnect gap must fail fast, never block.
+	if p.upstreamEverUp.Load() || p.upstreamReady == nil {
 		return errUpstreamDown
 	}
-	return w(b)
+	select {
+	case <-p.upstreamReady:
+		if w := p.getUpstreamWriter(); w != nil {
+			return w(b)
+		}
+		return errUpstreamDown
+	case <-time.After(p.firstUpstreamConnectWait):
+		return errUpstreamDown
+	}
+}
+
+// markUpstreamReady records the first successful upstream connection and
+// releases any client request waiting for it (see writeUpstream).
+func (p *Proxy) markUpstreamReady() {
+	p.upstreamEverUp.Store(true)
+	p.upstreamReadyOnce.Do(func() {
+		if p.upstreamReady != nil {
+			close(p.upstreamReady)
+		}
+	})
 }
 
 // upstreamSupervisor keeps the upstream connected for the lifetime of ctx. On any
@@ -100,6 +124,7 @@ func (p *Proxy) upstreamSupervisor(ctx context.Context, factory func() (transpor
 			p.setUpstreamWriter(up.Write)
 			p.setUpstreamInstance(up)
 			log.Printf("mcp-arc: upstream connected")
+			p.markUpstreamReady()
 			runErr := up.Run(ctx, p.onUpstreamMessage)
 			_ = up.Close()
 			p.setUpstreamWriter(nil)

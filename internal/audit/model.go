@@ -13,6 +13,10 @@ type CallRecord struct {
 	ErrorMsg  string    `db:"error_msg" json:"error_msg"`
 	LatencyMs int64     `db:"latency_ms" json:"latency_ms"`
 	Timestamp time.Time `db:"timestamp" json:"timestamp"`
+	// ReplayOf is non-zero when this record was produced by a console replay,
+	// and points at the original call it re-issued. It lets the audit log show
+	// replays distinctly and trace them back to their source.
+	ReplayOf int64 `db:"replay_of" json:"replay_of"`
 }
 
 type QueryOpts struct {
@@ -33,6 +37,14 @@ type Stats struct {
 	ErrorCount   int64            `json:"error_count"`
 	AvgLatencyMs float64          `json:"avg_latency_ms"`
 	ToolCounts   map[string]int64 `json:"tool_counts"`
+}
+
+// Retention bounds how large the audit log may grow. Zero values disable the
+// corresponding policy. It is consumed by Store.Prune (sqlite / postgres /
+// memory) and the proxy's background pruner.
+type Retention struct {
+	MaxAgeDays int // delete records older than this many days (0 = disabled)
+	MaxRows    int // keep at most this many newest records (0 = disabled)
 }
 
 // MaskRule is a masking rule as persisted in the `mask_rules` table.

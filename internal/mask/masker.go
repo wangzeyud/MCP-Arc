@@ -190,11 +190,19 @@ func maskFieldValue(rules []Rule, v any) any {
 	return DefaultMaskChar
 }
 
+// maskString applies EVERY matching rule, chaining their replacements, so a
+// value that carries several kinds of PII at once (an email *and* a card number
+// in the same sentence) is redacted by all of them. Returning at the first hit —
+// the previous behaviour — silently left every later rule unapplied, which is
+// exactly how a card number sitting next to an email address leaked through.
+//
+// ReplaceAllLiteralString (not ReplaceAllString) keeps mask_char literal even if
+// it contains "$": a mask is a fixed replacement, never a regex expansion.
 func maskString(rules []Rule, s string) string {
 	for _, rule := range rules {
 		for _, re := range rule.Pattern {
 			if re.MatchString(s) {
-				return re.ReplaceAllString(s, rule.MaskChar)
+				s = re.ReplaceAllLiteralString(s, rule.MaskChar)
 			}
 		}
 	}

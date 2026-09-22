@@ -47,11 +47,16 @@ type StdioUpstream struct {
 	out io.Reader
 }
 
-func NewStdioUpstream(command []string) (*StdioUpstream, error) {
+func NewStdioUpstream(command []string, dir string) (*StdioUpstream, error) {
 	if len(command) == 0 {
 		return nil, io.ErrShortWrite
 	}
 	cmd := exec.Command(command[0], command[1:]...)
+	// When dir is non-empty (set to the loaded config's directory) the upstream
+	// runs with a predictable working directory, so relative paths in the
+	// upstream command resolve against where the user placed config.yaml rather
+	// than the unpredictable CWD the MCP client spawned mcp-arc with.
+	cmd.Dir = dir
 	hideWindow(cmd)
 	in, err := cmd.StdinPipe()
 	if err != nil {

@@ -3,6 +3,7 @@ package mask
 import (
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -206,5 +207,63 @@ func TestMaskDeepCopies(t *testing.T) {
 	}
 	if out["pwd"] == "hunter2" {
 		t.Error("Mask must redact in the copy")
+	}
+}
+
+// Regression: maskString used to return after the first matching rule, so a
+// single value holding several kinds of PII was only partially redacted — the
+// earliest rule (email, first in config) won and the card number / API key next
+// to it leaked verbatim into the audit record.
+func TestMaskAppliesEveryMatchingRule(t *testing.T) {
+	m, err := New([]Spec{
+		{Name: "email", Patterns: []string{`\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b`}, MaskChar: "***@***.com", Enabled: true},
+		{Name: "credit_card", Patterns: []string{`\b\d{4}[\s-]?\d{4}[\s-]?\d{4}[\s-]?\d{4}\b`}, MaskChar: "****-****-****-****", Enabled: true},
+		{Name: "api_key", Patterns: []string{`\b(?:sk-|pk-|api[_-]?key|token)[-_A-Za-z0-9]{10,}\b`}, MaskChar: "****", Enabled: true},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const raw = "联系方式 a@b.com，卡号 4111111111111111，api_key sk-abcdefghij123"
+	out, err := m.Mask(map[string]any{"message": raw})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, _ := out["message"].(string)
+
+	for _, leak := range []string{"a@b.com", "4111111111111111", "sk-abcdefghij123"} {
+		if strings.Contains(got, leak) {
+			t.Errorf("raw value %q leaked through masking: %q", leak, got)
+		}
+	}
+	for _, want := range []string{"***@***.com", "****-****-****-****"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("expected %q in masked output, got %q", want, got)
+		}
+	}
+}
+
+// Rule order must not decide which rules fire. With the old early-return bug only
+// the first matching rule applied; here the same PII is fed with the rules
+// reversed (api_key, credit_card, email) and all three must still be redacted.
+func TestMaskOrderDoesNotSkipRules(t *testing.T) {
+	m, err := New([]Spec{
+		{Name: "api_key", Patterns: []string{`\b(?:sk-|pk-|api[_-]?key|token)[-_A-Za-z0-9]{10,}\b`}, MaskChar: "****", Enabled: true},
+		{Name: "credit_card", Patterns: []string{`\b\d{4}[\s-]?\d{4}[\s-]?\d{4}[\s-]?\d{4}\b`}, MaskChar: "****-****-****-****", Enabled: true},
+		{Name: "email", Patterns: []string{`\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b`}, MaskChar: "***@***.com", Enabled: true},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const raw = "联系方式 a@b.com，卡号 4111111111111111，api_key sk-abcdefghij123"
+	out, err := m.Mask(map[string]any{"message": raw})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, _ := out["message"].(string)
+	for _, leak := range []string{"a@b.com", "4111111111111111", "sk-abcdefghij123"} {
+		if strings.Contains(got, leak) {
+			t.Errorf("raw value %q leaked through masking: %q", leak, got)
+		}
 	}
 }

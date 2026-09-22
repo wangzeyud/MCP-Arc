@@ -7,6 +7,7 @@ CREATE TABLE IF NOT EXISTS calls (
     result      TEXT,
     error_msg   TEXT,
     latency_ms  INTEGER,
+    replay_of   INTEGER,
     timestamp   DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 

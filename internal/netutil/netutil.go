@@ -55,7 +55,14 @@ func portFree(host string, port int) bool {
 		return false
 	}
 	_ = ln.Close()
+	return connectFree(host, port)
+}
 
+// connectFree reports whether nothing is already answering on host:port. The
+// connect direction is normalized to 127.0.0.1 for wildcard hosts, mirroring
+// portFree's Windows workaround: a bind can succeed while another process owns
+// the port via SO_REUSEADDR, so a real connect is the ground truth.
+func connectFree(host string, port int) bool {
 	dialHost := host
 	switch dialHost {
 	case "", "0.0.0.0", "::", "[::]":
@@ -67,6 +74,41 @@ func portFree(host string, port int) bool {
 		return false
 	}
 	return true
+}
+
+// ReserveTCPPort claims the first TCP port >= preferred that is free to bind on
+// host ("" = all interfaces) and returns a held listener for it. Unlike
+// FreeTCPPort, the socket is NOT closed: the caller hands it straight to
+// http.Serve, so no other process can grab it in between. That closes the
+// test-then-release race that let two instances launched at the same time both
+// probe 8080 free and then collide on the real bind. changed reports whether the
+// port moved from preferred. If nothing is free in range it returns
+// (nil, preferred, false) so the caller can let the real bind surface a clear
+// error.
+//
+// The free check is portFree (bind, release, then dial): we must not dial our
+// own held socket, so the Windows SO_REUSEADDR probe happens before we grab the
+// port. The gap between that probe and the binding below is microseconds and
+// entirely within this process, which is far tighter than the old
+// probe-then-serve gap that caused the collision.
+func ReserveTCPPort(host string, preferred int) (net.Listener, int, bool) {
+	for i := range maxPortProbes {
+		p := preferred + i
+		if p > 65535 {
+			break
+		}
+		if !portFree(host, p) {
+			continue // taken (or, on Windows, already owned via SO_REUSEADDR)
+		}
+		ln, err := net.Listen("tcp", net.JoinHostPort(host, strconv.Itoa(p)))
+		if err != nil {
+			continue // lost the race to bind -> next
+		}
+		// A preferred of 0 lets the OS pick the port; report what we actually bound.
+		actualPort := ln.Addr().(*net.TCPAddr).Port
+		return ln, actualPort, actualPort != preferred
+	}
+	return nil, preferred, false
 }
 
 // SplitListen splits a listen address like ":8081" or "127.0.0.1:8081" into its

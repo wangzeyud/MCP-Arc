@@ -12,6 +12,8 @@ data/
 # audit database
 *.db
 *.db-journal
+*.db-wal
+*.db-shm
 
 # local config overrides
 config.local.yaml

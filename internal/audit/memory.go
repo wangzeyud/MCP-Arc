@@ -30,6 +30,9 @@ func (s *MemoryStore) Insert(r *CallRecord) error {
 	defer s.mu.Unlock()
 	s.callSeq++
 	r.ID = s.callSeq
+	if r.Timestamp.IsZero() {
+		r.Timestamp = time.Now()
+	}
 	s.calls = append(s.calls, *r)
 	return nil
 }
@@ -165,3 +168,25 @@ func (s *MemoryStore) DeleteRule(id int64) error {
 }
 
 func (s *MemoryStore) Close() error { return nil }
+
+// Prune drops records older than MaxAgeDays and keeps at most MaxRows newest
+// records, returning the number removed. It is best-effort and never blocks.
+func (s *MemoryStore) Prune(r Retention) (int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now()
+	kept := make([]CallRecord, 0, len(s.calls))
+	for _, c := range s.calls {
+		if r.MaxAgeDays > 0 && now.Sub(c.Timestamp) > time.Duration(r.MaxAgeDays)*24*time.Hour {
+			continue
+		}
+		kept = append(kept, c)
+	}
+	if r.MaxRows > 0 && len(kept) > r.MaxRows {
+		// calls are appended in insertion order, so the newest live at the tail.
+		kept = kept[len(kept)-r.MaxRows:]
+	}
+	dropped := int64(len(s.calls) - len(kept))
+	s.calls = kept
+	return dropped, nil
+}

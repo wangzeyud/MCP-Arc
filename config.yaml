@@ -1,18 +1,34 @@
 server:
   client_id: "default"
   # gateway mode: spawn the real MCP server as upstream (requires Node.js).
+  # Relative paths here resolve against THIS config file's directory, not the
+  # CWD the MCP client spawned mcp-arc with — so keep this file next to the
+  # binary and use relative paths without hardcoding absolute locations.
   upstream: ["node", "examples/echo-server/server.js"]
+  # wait (ms) for the upstream's FIRST connection. An npx child may still be
+  # downloading its package on a cold cache, which can exceed 10s. 0 => 30000.
+  # Raise (e.g. 60000) for slow first-time package installs. After the first
+  # connect the proxy fails fast again, so this only ever delays a cold start.
+  upstream_connect_timeout_ms: 30000
 
 transport:
-  client: sse            # MCP clients connect to MCP Arc over SSE
-  listen: ":8081"
+  client: stdio          # local mode: the MCP client (Cherry Studio / Claude Desktop / Cursor) spawns MCP Arc as a stdio child
+  listen: ":8081"        # only used by the HTTP client transports (sse / streamable-http)
   upstream: stdio        # MCP Arc talks to the upstream over stdio
 
 audit:
   enabled: true
-  driver: memory         # in-memory store: the GUI build is CGO_ENABLED=0, so sqlite (cgo) cannot load
+  # sqlite 用的是纯 Go 驱动（modernc.org/sqlite），CGO_ENABLED=0 也能加载，
+  # 记录持久化、重启不丢。相对的 dsn 会锚定到本配置文件所在目录（不是启动进程的
+  # CWD），所以多实例/被 MCP 客户端拉起时都不会把 db 落到奇怪的地方。
+  # 想临时跑"零残留"可改成 memory —— 但进程一退出就清空，控制台会一直看起来是空的。
+  driver: sqlite
   dsn: ./mcp-arc.db
   shutdown_flush_timeout_ms: 5000        # 优雅关闭时排干审计队列的最长时间
+  # 审计保留（可选，默认关闭）。两项均 0 = 不裁剪。
+  # retention:
+  #   max_age_days: 90     # 删除 90 天前的记录
+  #   max_rows: 1000000   # 仅保留最新 100 万条（启动裁剪 + 每小时周期清理）
 
 masking:
   enabled: true
@@ -65,4 +81,4 @@ admin:
   enabled: true
   port: 8080
   token: "change-me"
-  open_browser: true   # auto-open the web console in the default browser on startup
+  open_browser: false  # do not pop a browser on every launch; open http://localhost:8080 yourself when you want the console

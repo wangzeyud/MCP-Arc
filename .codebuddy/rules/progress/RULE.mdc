@@ -1,5 +1,5 @@
 ---
-description: 版本进度表（v0.1–v0.5），确认改动落在正确版本范围、不超范围。v0.5 为规范对齐（MCP 2026-07-28）。
+description: 版本进度表（v0.1–v0.6），确认改动落在正确版本范围、不超范围。v0.5 为规范对齐（MCP 2026-07-28），v0.6 为四件套打磨（回放增强+审计保留）。
 alwaysApply: false
 enabled: true
 updatedAt: 2026-09-21T11:00:00.000Z
@@ -14,6 +14,17 @@ provider:
 | v0.2 | ✅ 完成 | LLM 辅助脱敏、控制台规则 CRUD、JSON/CSV 导出 |
 | v0.3 | ✅ 完成 | 上游异常优雅处理（重连/重启）、审计写入异步化+超时降级、预置脱敏规则模板、审计回放 UI、优雅关闭 flush（不丢审计/不挂客户端） |
 | v0.4 | ✅ 完成 | 稳定性 / soak 测试 + race 验证（内部质量，非新功能） |
-| v0.5 | ✅ 已实现 | 规范对齐（MCP 2026-07-28）：新增 Streamable HTTP 传输（client+upstream，T1–T3）、方法无关透传、通知作用域与取消传播（T4–T5）、InputRequiredResult 审计/不嵌套脱敏（T6）、传输单测+soak 变体（T7）、文档/规则更新（T8）；SSE 标记 legacy。详见 `docs/v0.5-plan.md`。**T5 已完成并验证**：客户端断开→代理主动取消在途上游请求（`handleClientMessage` 异步转发，传输层在连接关闭时调用 `cleanup→cancelUpstream+dropPending`），已由真实代理级 E2E 测试 `TestE2EStreamableHTTPProxyCancelOnClientDisconnect` 覆盖。 |
+| v0.5 | ✅ 已完成 | 规范对齐（MCP 2026-07-28）：新增 Streamable HTTP 传输（client+upstream，T1–T3）、方法无关透传、通知作用域与取消传播（T4–T5）、InputRequiredResult 审计/不嵌套脱敏（T6）、传输单测+soak 变体（T7）、文档/规则更新（T8）；SSE 标记 legacy。详见 `docs/v0.5-plan.md`。**T5 已完成并验证**：客户端断开→代理主动取消在途上游请求，已由真实代理级 E2E 测试 `TestE2EStreamableHTTPProxyCancelOnClientDisconnect` 覆盖。 |
+| v0.6 | ✅ 已完成 | 四件套打磨：**回放增强**——批量回放 API `/api/replay/batch`（按 id 列表或过滤器解析，顺序执行、单条失败不中断）+ 结果 Diff（exact JSON 比对，验证上游是否仍返回一致结果）；**审计保留**——`audit.retention`（`max_age_days`/`max_rows`，默认关闭、向后兼容），启动裁剪 + 周期后台清理 worker（跨 SQLite/PG/Memory，失败 fail-open 不阻塞主流程）；控制台 Logs 页支持多选回放 + Diff 面板。测试：audit/内存/代理三级 retention 单测、admin 批量回放单测。 |
 
-> v0.5 传输层规范对齐已完成（T1–T8）。范围为传输层，不新增"四件套"之外功能。新改动如属于"配置热加载/告警 webhook/统计增强/7×24 soak"等曾被推迟项，需先确认其目标版本，不得擅自塞入后续迭代。
+> v0.5/v0.6 均限制在四件套 + 观测 UI + 交付/安全加固范围内。新改动如属于"配置热加载/告警 webhook/统计增强/7×24 soak"等曾被推迟项，需先确认其目标版本，不得擅自塞入后续迭代。
+
+> **近期修复（会话内，未计入版本表）**：
+> - **proxy stdio 启动竞态（第二节）**：客户端（Cherry Studio/Claude Desktop/Cursor）拉起 mcp-arc 即发 `initialize`，但上游子进程尚未连上，`writeUpstream` 直接返回 `upstream not connected`，握手判死。改为**首次连接前有限等待（10s）连上即转发、之后仍 fail-fast**（不阻塞重连间隙），配套 `internal/proxy/upstream_ready_test.go`。
+> - **`config.yaml` 默认 `transport.client: stdio` + `admin.open_browser: false`**：本地 stdio 代理（模式 A）成为默认形态；不再每次被 MCP client 拉起时弹浏览器。
+> - **CLI 上游解析（第四节-2）**：`--upstream` 改用引号感知切分（替代 `strings.Fields`），支持含空格的路径；配套 `cmd/mcp-arc/main_test.go`。
+> - **配置发现顺序（第四节-3）**：`--config` > `MCP_ARC_CONFIG` 环境变量 > 可执行文件同目录 > 平台配置目录（Linux XDG / Windows %APPDATA% / macOS ~/Library/Application Support）。无配置时回退内置默认值，**不再强制弹浏览器**（仅日志打印控制台 URL）。
+> - **回放 Diff "全 changed" bug 修复（v0.6 回放增强）**：`handleReplay` 返回的 `resp` 是完整 JSON-RPC 信封（`{jsonrpc,id,result}`），而库里 `RawResult` 仅存结果体（`result` 对象）。旧 `computeDiff` 直接对信封与结果体做 `DeepEqual`，永远不等 ⇒ 全部显示 changed。`computeDiff` 现先 `unwrapResult` 拆出 `.result`（或 `.error`）再比对；python/JS 端测试改用信封以贴近生产。配套 `TestComputeDiffUnwrapsEnvelope`。
+> - **首次连接等待改为可配（第四节-3 衍生）**：硬编码 `10s` 改为 `server.upstream_connect_timeout_ms`（默认 30000，CLI `--upstream-connect-timeout-ms`）。npx 冷启动首次下载包常 >10s，现可调大到 60s；首次连上后仍 fail-fast。配套 `TestWriteUpstreamFirstConnectTimeoutConfigurable`。
+> - **多实例 :8080 冲突 → 方案 A 原子占用（第四节第 5 项落地）**：旧 `resolvePorts` 用 `netutil.FreeTCPPort` 是"bind 即 close"的探测，多实例同时启动存在 TOCTOU 竞态（都测到 8080 空闲 → 真实 bind 才冲突）。新增 `netutil.ReserveTCPPort(host, preferred)`：先用 `portFree`（bind→释放→dial 的 Windows SO_REUSEADDR 探测）确认空闲，再 bind 并**持有不释放**该 listener，交给 `admin.Server.StartListener` 直接 serve，消除间隙。main `resolvePorts` 现返回持有的 admin listener 并经 `proxy.Options.AdminListener` 传入；`cfg.Admin.Port` 仍回写为真实端口以生成正确控制台 URL。`admin.Server` 新增 `StartListener`/`Serve`，原 `Start(port)` 保留（测试/回退）。配套 `TestReserveTCPPortHoldsAndMoves` / `TestReserveTCPPortKeepsPreferred` / `TestResolvePortsReservesAdminListener`。
+> - **脱敏只应用首条规则（严重漏脱敏）**：`mask.maskString` 命中第一条匹配规则即 `return`，导致一个字符串只被一条规则处理——规则列表里 `email` 排第一时，同一句中的卡号 / api_key 全部漏遮，审计记录落库的是原文。改为**遍历所有命中规则依次叠加替换**（用 `ReplaceAllLiteralString`，mask 串按字面替换，避免 `$` 被当展开符）。配套 `TestMaskAppliesEveryMatchingRule`（正序）与 `TestMaskOrderDoesNotSkipRules`（反序），证明脱敏完整性不再依赖规则顺序。

@@ -6,8 +6,8 @@ import (
 
 	// modernc.org/sqlite is a pure-Go SQLite driver (no cgo), so the sidecar
 	// builds and runs with CGO_ENABLED=0 — keeping audit/replay persistence
-	// working in a single portable binary. It registers the "sqlite3" driver
-	// name, so sql.Open below is unchanged.
+	// working in a single portable binary. It registers the "sqlite" driver
+	// name, which is what sql.Open uses below.
 	_ "modernc.org/sqlite"
 )
 
@@ -19,12 +19,19 @@ type SQLiteStore struct {
 }
 
 func NewSQLite(dsn string) (*SQLiteStore, error) {
-	db, err := sql.Open("sqlite3", dsn)
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err
 	}
 	if err := db.Ping(); err != nil {
 		return nil, err
+	}
+	// WAL + a busy timeout let several mcp-arc instances (each with its own
+	// console) share one database file without tripping over "database is
+	// locked": modernc's default busy timeout is 0, so a concurrent writer would
+	// fail instantly instead of waiting for the other to commit.
+	if _, err := db.Exec(`PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000; PRAGMA synchronous=NORMAL;`); err != nil {
+		return nil, fmt.Errorf("configure sqlite: %w", err)
 	}
 	s := &SQLiteStore{db: db}
 	if err := s.migrate(); err != nil {
@@ -69,6 +76,7 @@ func (s *SQLiteStore) migrate() error {
 	for _, ddl := range []string{
 		`ALTER TABLE calls ADD COLUMN raw_params TEXT`,
 		`ALTER TABLE calls ADD COLUMN raw_result TEXT`,
+		`ALTER TABLE calls ADD COLUMN replay_of INTEGER`,
 	} {
 		_, _ = s.db.Exec(ddl)
 	}
@@ -77,15 +85,15 @@ func (s *SQLiteStore) migrate() error {
 
 func (s *SQLiteStore) Insert(r *CallRecord) error {
 	_, err := s.db.Exec(
-		`INSERT INTO calls (client_id, tool_name, params, raw_params, raw_result, result, error_msg, latency_ms, timestamp)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		r.ClientID, r.ToolName, r.Params, r.RawParams, r.RawResult, r.Result, r.ErrorMsg, r.LatencyMs, r.Timestamp,
+		`INSERT INTO calls (client_id, tool_name, params, raw_params, raw_result, result, error_msg, latency_ms, timestamp, replay_of)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		r.ClientID, r.ToolName, r.Params, r.RawParams, r.RawResult, r.Result, r.ErrorMsg, r.LatencyMs, r.Timestamp, r.ReplayOf,
 	)
 	return err
 }
 
 func (s *SQLiteStore) Query(opts QueryOpts) ([]CallRecord, error) {
-	query := `SELECT id, client_id, tool_name, params, raw_params, raw_result, result, error_msg, latency_ms, timestamp
+	query := `SELECT id, client_id, tool_name, params, raw_params, raw_result, result, error_msg, latency_ms, timestamp, replay_of
 	          FROM calls WHERE 1=1`
 	var args []any
 	if opts.ClientID != "" {
@@ -121,7 +129,7 @@ func (s *SQLiteStore) Query(opts QueryOpts) ([]CallRecord, error) {
 	for rows.Next() {
 		var r CallRecord
 		if err := rows.Scan(&r.ID, &r.ClientID, &r.ToolName, &r.Params, &r.RawParams, &r.RawResult,
-			&r.Result, &r.ErrorMsg, &r.LatencyMs, &r.Timestamp); err != nil {
+			&r.Result, &r.ErrorMsg, &r.LatencyMs, &r.Timestamp, &r.ReplayOf); err != nil {
 			return nil, err
 		}
 		out = append(out, r)
@@ -132,10 +140,10 @@ func (s *SQLiteStore) Query(opts QueryOpts) ([]CallRecord, error) {
 func (s *SQLiteStore) Get(id int64) (*CallRecord, error) {
 	var r CallRecord
 	err := s.db.QueryRow(
-		`SELECT id, client_id, tool_name, params, raw_params, raw_result, result, error_msg, latency_ms, timestamp
+		`SELECT id, client_id, tool_name, params, raw_params, raw_result, result, error_msg, latency_ms, timestamp, replay_of
 		 FROM calls WHERE id = ?`, id,
 	).Scan(&r.ID, &r.ClientID, &r.ToolName, &r.Params, &r.RawParams, &r.RawResult,
-		&r.Result, &r.ErrorMsg, &r.LatencyMs, &r.Timestamp)
+		&r.Result, &r.ErrorMsg, &r.LatencyMs, &r.Timestamp, &r.ReplayOf)
 	if err != nil {
 		return nil, err
 	}
@@ -179,6 +187,32 @@ func (s *SQLiteStore) Stats(opts StatsOpts) (*Stats, error) {
 
 func (s *SQLiteStore) Close() error {
 	return s.db.Close()
+}
+
+// Prune deletes old / excess audit records according to the retention policy.
+// Both policies are best-effort and never block the request path. It returns the
+// number of rows removed.
+func (s *SQLiteStore) Prune(r Retention) (int64, error) {
+	var deleted int64
+	if r.MaxAgeDays > 0 {
+		res, err := s.db.Exec(`DELETE FROM calls WHERE timestamp < datetime('now', ?)`, fmt.Sprintf("-%d days", r.MaxAgeDays))
+		if err != nil {
+			return deleted, err
+		}
+		if n, err := res.RowsAffected(); err == nil {
+			deleted += n
+		}
+	}
+	if r.MaxRows > 0 {
+		res, err := s.db.Exec(`DELETE FROM calls WHERE id NOT IN (SELECT id FROM calls ORDER BY id DESC LIMIT ?)`, r.MaxRows)
+		if err != nil {
+			return deleted, err
+		}
+		if n, err := res.RowsAffected(); err == nil {
+			deleted += n
+		}
+	}
+	return deleted, nil
 }
 
 // --- masking rules ---------------------------------------------------------

@@ -204,6 +204,12 @@ curl -X POST -H "Authorization: Bearer change-me" -H "Content-Type: application/
 
 ## 更新日志
 
+### v0.6 —— 四件套打磨（回放 + 审计保留）
+- **批量回放** —— `POST /api/replay/batch` 一次性重发多条已记录的 `tools/call`，支持显式 `call_ids` 列表或用 `filter`（tool / client_id / since / until / limit）解析。顺序执行，复用同一套 id 改写/关联机制；单条失败只记录、不中断其余。
+- **回放 Diff** —— 带 `diff: true` 时，把每条重放响应与原始记录的 `raw_result` 做**精确 JSON 比对**，用于验证上游是否仍返回一致结果。单条与批量回放均支持。
+- **审计保留** —— `audit.retention`（`max_age_days` / `max_rows`，默认关闭）限制审计库增长。启动时裁剪 + 周期后台清理 worker（SQLite / PostgreSQL / memory），fail-open：清理出错绝不阻塞主流程。
+- **控制台** —— 调用日志页支持多选回放 + Diff 开关 + 逐条结果面板。
+
 ### v0.5 —— 规范对齐（MCP 2026-07-28）
 - **Streamable HTTP 传输** —— 客户端与上游均为单 POST 端点（`transport.client` / `transport.upstream: streamable-http`），符合 2026-07-28 规范。旧的 HTTP+SSE 适配器保留为 `sse` 并标记 **legacy**；新部署推荐 Streamable HTTP。
 - **方法无关透传** —— 原样转发所有 JSON-RPC 方法（tools/*、resources/*、prompts/*、sampling、elicitation、roots、subscriptions、MRTR、progress、cancellation 等）；仅对 `tools/call`（及 sampling/elicitation）入参做脱敏/审计解析。
@@ -230,6 +236,7 @@ curl -X POST -H "Authorization: Bearer change-me" -H "Content-Type: application/
 - **v0.3** ✅ 稳定性与生产可用性：预置脱敏模板、审计写入异步化+超时降级、上游重连、回放 UI、优雅关闭 flush。
 - **v0.4** ✅——稳定性 / soak 测试 + race 验证（内部质量，非新功能）。
 - **v0.5** ✅——规范对齐（MCP 2026-07-28）：Streamable HTTP 传输、方法无关透传、通知作用域与取消传播（客户端断开取消在途上游）、`InputRequiredResult` 审计；SSE 标记 legacy。
+- **v0.6** ✅——四件套打磨：批量回放 + 回放 Diff（`/api/replay/batch`，与记录结果精确 JSON 比对）、审计保留（`audit.retention` 的 max_age_days/max_rows，启动裁剪 + 周期 worker）、控制台多选回放 UI。
 
 ## License
 MIT —— 见 [LICENSE](./LICENSE)。

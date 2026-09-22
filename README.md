@@ -215,6 +215,12 @@ Rides the same id-rewrite / response-correlation machinery as a live call (stdio
 
 ## Changelog
 
+### v0.6 — four-pillar polish (replay + audit retention)
+- **Batch replay** — `POST /api/replay/batch` re-issues many recorded `tools/call`s at once, either by explicit `call_ids` or by a `filter` (tool / client_id / since / until / limit). Replays run sequentially reusing the same id-rewrite / correlation path; a single failure is recorded and the rest continue.
+- **Replay diff** — with `diff: true`, each replayed response is compared (exact JSON equality) against the originally recorded `raw_result`, so operators can verify the upstream still behaves. Available on both single and batch replay.
+- **Audit retention** — `audit.retention` (`max_age_days` / `max_rows`, default off) bounds how large the audit log may grow. Records are trimmed at startup and on a periodic background worker (SQLite / PostgreSQL / memory), fail-open so a prune error never blocks the request path.
+- **Console** — the Call Logs page supports multi-select replay with a diff toggle and a per-call results panel.
+
 ### v0.5 — spec alignment (MCP 2026-07-28)
 - **Streamable HTTP transport** — single POST endpoint for both client and upstream (`transport.client` / `transport.upstream: streamable-http`), matching the 2026-07-28 spec. The older HTTP+SSE adapter is retained as `sse` and marked **legacy**; Streamable HTTP is recommended for new deployments.
 - **Method-agnostic passthrough** — forwards all JSON-RPC methods (tools/*, resources/*, prompts/*, sampling, elicitation, roots, subscriptions, MRTR, progress, cancellation, …) unchanged; only `tools/call` (and sampling/elicitation) params are inspected for masking/audit.
@@ -241,6 +247,7 @@ Rides the same id-rewrite / response-correlation machinery as a live call (stdio
 - **v0.3** ✅ stability and production readiness: preset templates, async/timeout-bounded audit writes, upstream reconnect, replay UI, graceful shutdown.
 - **v0.4** ✅ — stability / soak testing + race verification (internal quality; no new features).
 - **v0.5** ✅ — spec alignment (MCP 2026-07-28): Streamable HTTP transport, method-agnostic passthrough, notification scoping & cancellation propagation (client disconnect cancels in-flight upstream), `InputRequiredResult` audit; SSE marked legacy.
+- **v0.6** ✅ — four-pillar polish: batch replay + replay diff (`/api/replay/batch`, exact JSON comparison vs recorded result), audit retention (`audit.retention` max_age_days/max_rows with startup trim + periodic worker), console multi-select replay UI.
 
 ## License
 MIT — see [LICENSE](./LICENSE).

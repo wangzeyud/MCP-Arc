@@ -3,6 +3,8 @@ package config
 import (
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -15,11 +17,22 @@ type Config struct {
 	LLM       LLMConfig       `yaml:"llm"`
 	RateLimit RateLimitConfig `yaml:"rate_limit"`
 	Admin     AdminConfig     `yaml:"admin"`
+	// ConfigDir is the directory of the loaded config file. It is set by Load
+	// (not from YAML) and is used to anchor relative paths in server.upstream,
+	// so a single binary plus config work regardless of the CWD the MCP client
+	// spawned mcp-arc with. Empty when built from defaults (no config file).
+	ConfigDir string `yaml:"-"`
 }
 
 type ServerConfig struct {
 	ClientID string   `yaml:"client_id"`
-	Upstream []string `yaml:"upstream"` // stdio upstream command + args
+	Upstream []string `yaml:"upstream"` // stdio upstream command + args; relative paths resolve against the config file's directory
+	// UpstreamConnectTimeoutMs gates how long a client request waits for the
+	// upstream's very first connection. An npx child (npx -y @…/server) may be
+	// still downloading its package on a cold cache, which can take well over the
+	// old 10s hard cap. 0 → 30000 (30s). After the first connect the proxy fails
+	// fast again, so this only ever delays a genuine cold start.
+	UpstreamConnectTimeoutMs int `yaml:"upstream_connect_timeout_ms"`
 }
 
 // TransportConfig selects how MCP Arc talks to the MCP client and to the upstream
@@ -35,12 +48,21 @@ type TransportConfig struct {
 }
 
 type AuditConfig struct {
-	Enabled                bool   `yaml:"enabled"`
-	Driver                 string `yaml:"driver"`                    // sqlite | postgres | memory
-	DSN                    string `yaml:"dsn"`                       // ./mcp-arc.db
-	QueueSize              int    `yaml:"queue_size"`                // audit write buffer; 0 → default 1024
-	WriteTimeoutMs         int    `yaml:"write_timeout_ms"`          // per-insert wall-clock timeout; 0 → 2s
-	ShutdownFlushTimeoutMs int    `yaml:"shutdown_flush_timeout_ms"` // max time to drain the queue on shutdown; 0 → 5s
+	Enabled                bool             `yaml:"enabled"`
+	Driver                 string           `yaml:"driver"`                    // sqlite | postgres | memory
+	DSN                    string           `yaml:"dsn"`                       // ./mcp-arc.db
+	QueueSize              int              `yaml:"queue_size"`                // audit write buffer; 0 → default 1024
+	WriteTimeoutMs         int              `yaml:"write_timeout_ms"`          // per-insert wall-clock timeout; 0 → 2s
+	ShutdownFlushTimeoutMs int              `yaml:"shutdown_flush_timeout_ms"` // max time to drain the queue on shutdown; 0 → 5s
+	Retention              RetentionConfig  `yaml:"retention"`                 // audit record pruning; zero values disable
+}
+
+// RetentionConfig bounds how large the audit log may grow. Both fields default
+// to 0, which disables that policy — existing configs keep their current
+// (unbounded) behaviour until an operator opts in.
+type RetentionConfig struct {
+	MaxAgeDays int `yaml:"max_age_days"` // delete records older than N days (0 = disabled)
+	MaxRows    int `yaml:"max_rows"`     // keep at most N newest records (0 = disabled)
 }
 
 type MaskingConfig struct {
@@ -109,7 +131,31 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("parse config: %w", err)
 	}
 	applyDefaults(&c)
+	if abs, err := filepath.Abs(path); err == nil {
+		c.ConfigDir = filepath.Dir(abs)
+	}
+	anchorAuditDSN(&c)
 	return &c, nil
+}
+
+// anchorAuditDSN resolves a relative sqlite DSN against the config file's
+// directory, mirroring how server.upstream is anchored. Without it the database
+// is created relative to whatever CWD the MCP client happened to spawn mcp-arc
+// with (typically the client's own directory), which is surprising and often
+// not writable. Postgres URLs, sqlite "file:" URIs and ":memory:" pass through
+// untouched, as do already-absolute paths.
+func anchorAuditDSN(c *Config) {
+	if c.ConfigDir == "" || c.Audit.DSN == "" {
+		return
+	}
+	if c.Audit.Driver == "postgres" || c.Audit.Driver == "memory" {
+		return
+	}
+	dsn := c.Audit.DSN
+	if filepath.IsAbs(dsn) || strings.Contains(dsn, "://") || strings.HasPrefix(dsn, "file:") || dsn == ":memory:" {
+		return
+	}
+	c.Audit.DSN = filepath.Join(c.ConfigDir, dsn)
 }
 
 func Default() *Config {
@@ -140,6 +186,9 @@ func applyDefaults(c *Config) {
 		} else {
 			c.Server.ClientID = "default"
 		}
+	}
+	if c.Server.UpstreamConnectTimeoutMs <= 0 {
+		c.Server.UpstreamConnectTimeoutMs = 30000
 	}
 	if c.Transport.Client == "" {
 		c.Transport.Client = "stdio"

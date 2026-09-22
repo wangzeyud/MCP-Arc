@@ -81,3 +81,43 @@ func TestURLForListen(t *testing.T) {
 		t.Errorf("URLForListen(bogus) = %q, want empty", got)
 	}
 }
+
+// ReserveTCPPort must hold the socket (not release it after probing) so two
+// instances launched at the same time cannot both grab the same port. The first
+// reserve keeps its port; a second reserve of that same port must move away.
+func TestReserveTCPPortHoldsAndMoves(t *testing.T) {
+	port := freePort(t)
+	ln, got, moved := ReserveTCPPort("127.0.0.1", port)
+	if ln == nil || got != port || moved {
+		t.Fatalf("ReserveTCPPort(%d) = (%v,%d,%v), want (listener,%d,false)", port, ln, got, moved, port)
+	}
+	defer ln.Close()
+	if lp := ln.Addr().(*net.TCPAddr).Port; lp != port {
+		t.Fatalf("listener bound on %d, reported %d", lp, port)
+	}
+
+	// Second instance spawned at the same time: must not collide with the first.
+	ln2, port2, moved2 := ReserveTCPPort("127.0.0.1", port)
+	if ln2 == nil {
+		t.Fatalf("second ReserveTCPPort = nil, want a held socket on a different port")
+	}
+	defer ln2.Close()
+	if !moved2 || port2 == port {
+		t.Fatalf("second reserve: port=%d moved=%v, want moved && != %d", port2, moved2, port)
+	}
+}
+
+// When the preferred port is genuinely free, ReserveTCPPort returns it without
+// moving and the socket stays bound (a follow-up probe sees it occupied).
+func TestReserveTCPPortKeepsPreferred(t *testing.T) {
+	port := freePort(t)
+	ln, got, moved := ReserveTCPPort("127.0.0.1", port)
+	if ln == nil || got != port || moved {
+		t.Fatalf("ReserveTCPPort(%d) = (%v,%d,%v), want (listener,%d,false)", port, ln, got, moved, port)
+	}
+	defer ln.Close()
+	// The held socket now answers, so FreeTCPPort must treat it as taken.
+	if free, _ := FreeTCPPort("127.0.0.1", port); free == port {
+		t.Fatalf("held port %d should be reported taken by FreeTCPPort", port)
+	}
+}

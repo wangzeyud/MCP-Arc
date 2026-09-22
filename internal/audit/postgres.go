@@ -67,6 +67,7 @@ func (s *PostgresStore) migrate() error {
 	for _, ddl := range []string{
 		`ALTER TABLE calls ADD COLUMN IF NOT EXISTS raw_params TEXT`,
 		`ALTER TABLE calls ADD COLUMN IF NOT EXISTS raw_result TEXT`,
+		`ALTER TABLE calls ADD COLUMN IF NOT EXISTS replay_of BIGINT`,
 	} {
 		if _, err := s.db.Exec(ddl); err != nil {
 			return err
@@ -77,15 +78,15 @@ func (s *PostgresStore) migrate() error {
 
 func (s *PostgresStore) Insert(r *CallRecord) error {
 	_, err := s.db.Exec(
-		`INSERT INTO calls (client_id, tool_name, params, raw_params, raw_result, result, error_msg, latency_ms, timestamp)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-		r.ClientID, r.ToolName, r.Params, r.RawParams, r.RawResult, r.Result, r.ErrorMsg, r.LatencyMs, r.Timestamp,
+		`INSERT INTO calls (client_id, tool_name, params, raw_params, raw_result, result, error_msg, latency_ms, timestamp, replay_of)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+		r.ClientID, r.ToolName, r.Params, r.RawParams, r.RawResult, r.Result, r.ErrorMsg, r.LatencyMs, r.Timestamp, r.ReplayOf,
 	)
 	return err
 }
 
 func (s *PostgresStore) Query(opts QueryOpts) ([]CallRecord, error) {
-	query := `SELECT id, client_id, tool_name, params, raw_params, raw_result, result, error_msg, latency_ms, timestamp
+	query := `SELECT id, client_id, tool_name, params, raw_params, raw_result, result, error_msg, latency_ms, timestamp, replay_of
 	          FROM calls WHERE 1=1`
 	var args []any
 	n := 0
@@ -123,7 +124,7 @@ func (s *PostgresStore) Query(opts QueryOpts) ([]CallRecord, error) {
 	for rows.Next() {
 		var r CallRecord
 		if err := rows.Scan(&r.ID, &r.ClientID, &r.ToolName, &r.Params, &r.RawParams, &r.RawResult,
-			&r.Result, &r.ErrorMsg, &r.LatencyMs, &r.Timestamp); err != nil {
+			&r.Result, &r.ErrorMsg, &r.LatencyMs, &r.Timestamp, &r.ReplayOf); err != nil {
 			return nil, err
 		}
 		out = append(out, r)
@@ -134,10 +135,10 @@ func (s *PostgresStore) Query(opts QueryOpts) ([]CallRecord, error) {
 func (s *PostgresStore) Get(id int64) (*CallRecord, error) {
 	var r CallRecord
 	err := s.db.QueryRow(
-		`SELECT id, client_id, tool_name, params, raw_params, raw_result, result, error_msg, latency_ms, timestamp
+		`SELECT id, client_id, tool_name, params, raw_params, raw_result, result, error_msg, latency_ms, timestamp, replay_of
 		 FROM calls WHERE id = $1`, id,
 	).Scan(&r.ID, &r.ClientID, &r.ToolName, &r.Params, &r.RawParams, &r.RawResult,
-		&r.Result, &r.ErrorMsg, &r.LatencyMs, &r.Timestamp)
+		&r.Result, &r.ErrorMsg, &r.LatencyMs, &r.Timestamp, &r.ReplayOf)
 	if err != nil {
 		return nil, err
 	}
@@ -185,6 +186,32 @@ func (s *PostgresStore) Stats(opts StatsOpts) (*Stats, error) {
 
 func (s *PostgresStore) Close() error {
 	return s.db.Close()
+}
+
+// Prune deletes old / excess audit records according to the retention policy.
+// Both policies are best-effort and never block the request path. It returns the
+// number of rows removed.
+func (s *PostgresStore) Prune(r Retention) (int64, error) {
+	var deleted int64
+	if r.MaxAgeDays > 0 {
+		res, err := s.db.Exec(`DELETE FROM calls WHERE timestamp < NOW() - ($1 || ' days')::interval`, r.MaxAgeDays)
+		if err != nil {
+			return deleted, err
+		}
+		if n, err := res.RowsAffected(); err == nil {
+			deleted += n
+		}
+	}
+	if r.MaxRows > 0 {
+		res, err := s.db.Exec(`DELETE FROM calls WHERE id NOT IN (SELECT id FROM calls ORDER BY id DESC LIMIT $1)`, r.MaxRows)
+		if err != nil {
+			return deleted, err
+		}
+		if n, err := res.RowsAffected(); err == nil {
+			deleted += n
+		}
+	}
+	return deleted, nil
 }
 
 // --- masking rules ---------------------------------------------------------

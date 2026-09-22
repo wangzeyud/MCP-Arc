@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"os/signal"
 	"sync"
@@ -27,6 +28,12 @@ import (
 	"github.com/wangzeyud/mcp-arc/internal/transport"
 )
 
+// procStartedAt is when this process came up. Together with the PID it is
+// reported through /api/status so the console can show which instance the
+// operator is actually looking at (a stale tab or a leftover process otherwise
+// looks exactly like a quiet one).
+var procStartedAt = time.Now()
+
 type Options struct {
 	UpstreamCmd []string
 	Config      *config.Config
@@ -35,6 +42,16 @@ type Options struct {
 	// Streamable HTTP); it is empty only when the client transport is "stdio".
 	SSEURL     string
 	ConsoleURL string
+	// ConfigDir anchors relative paths in server.upstream to the directory of the
+	// loaded config file, so the upstream runs with a predictable working directory
+	// regardless of the CWD the MCP client spawned mcp-arc with. Empty when no
+	// config file was loaded (built-in defaults).
+	ConfigDir string
+	// AdminListener, when non-nil, is the already-reserved (bound, held) socket
+	// for the web console. main.go reserves it atomically so two instances never
+	// collide on the same admin port. When nil the server falls back to binding
+	// Config.Admin.Port itself (used by tests and embedded scenarios).
+	AdminListener net.Listener
 }
 
 type Proxy struct {
@@ -50,6 +67,19 @@ type Proxy struct {
 	upstreamInstance  transport.UpstreamTransporter // live upstream, for per-request cancel
 	clientBroadcast   func([]byte) error
 
+	// upstreamEverUp is true once the upstream has connected at least once;
+	// upstreamReady is closed at that first connect. Together they let a client
+	// request arriving during startup wait for the initial connect instead of
+	// being rejected, while still failing fast during a later reconnect gap.
+	upstreamEverUp    atomic.Bool
+	upstreamReady     chan struct{}
+	upstreamReadyOnce sync.Once
+
+	// firstUpstreamConnectWait bounds how long a client request waits for the
+	// upstream's very first connection (see writeUpstream). Config-driven via
+	// server.upstream_connect_timeout_ms.
+	firstUpstreamConnectWait time.Duration
+
 	mu         sync.Mutex
 	upstreamMu sync.RWMutex
 	seq        atomic.Int64
@@ -58,11 +88,19 @@ type Proxy struct {
 
 func New(opts Options) *Proxy {
 	p := &Proxy{
-		opts:        opts,
-		clientID:    opts.Config.Server.ClientID,
-		auditWrites: opts.Config.Audit.Enabled,
-		pending:     make(map[string]*pendingCall),
+		opts:          opts,
+		clientID:      opts.Config.Server.ClientID,
+		auditWrites:   opts.Config.Audit.Enabled,
+		pending:       make(map[string]*pendingCall),
+		upstreamReady: make(chan struct{}),
 	}
+	// Config guarantees a positive default; guard anyway against a 0 that would
+	// make the first-connect wait instant.
+	uct := opts.Config.Server.UpstreamConnectTimeoutMs
+	if uct <= 0 {
+		uct = 30000
+	}
+	p.firstUpstreamConnectWait = time.Duration(uct) * time.Millisecond
 
 	// One store backs both call records and masking rules, so the console can
 	// edit rules without a second connection (or a second SQLite file lock).
@@ -121,6 +159,10 @@ func (p *Proxy) run(parent context.Context) error {
 		go p.auditWorker(ctx, auditDone)
 	}
 
+	// Audit retention: trim old/excess records at startup and periodically.
+	// Best-effort and fail-open — a prune failure never blocks or aborts the proxy.
+	p.startRetention(ctx)
+
 	// --- upstream transport factory ---
 	// The upstream may die at any time; upstreamSupervisor recreates it on every
 	// failure, so we keep a factory rather than a single live connection.
@@ -148,7 +190,7 @@ func (p *Proxy) run(parent context.Context) error {
 		}
 		cmd := p.opts.UpstreamCmd
 		upstreamFactory = func() (transport.UpstreamTransporter, error) {
-			return transport.NewStdioUpstream(cmd)
+			return transport.NewStdioUpstream(cmd, p.opts.ConfigDir)
 		}
 	}
 
@@ -183,8 +225,18 @@ func (p *Proxy) run(parent context.Context) error {
 				SSEURL:          p.opts.SSEURL,
 				ConsoleURL:      p.opts.ConsoleURL,
 				AdminPort:       p.opts.Config.Admin.Port,
+				PID:             os.Getpid(),
+				StartedAt:       procStartedAt.Format(time.RFC3339),
+				AuditDriver:     p.opts.Config.Audit.Driver,
+				ConfigDir:       p.opts.Config.ConfigDir,
 			}
-			if e := srv.Start(p.opts.Config.Admin.Port); e != nil {
+			var e error
+			if p.opts.AdminListener != nil {
+				e = srv.StartListener(p.opts.AdminListener)
+			} else {
+				e = srv.Start(p.opts.Config.Admin.Port)
+			}
+			if e != nil {
 				log.Printf("warn: admin server stopped: %v", e)
 			}
 		}()
@@ -354,3 +406,50 @@ func (p *Proxy) Replay(ctx context.Context, toolName string, rawParams []byte) (
 		return nil, errors.New("replay timeout")
 	}
 }
+
+// retentionPruner is implemented by the concrete audit stores that support
+// pruning. It is matched via type assertion so the Store interface (and the test
+// fakes that implement it) stay untouched.
+type retentionPruner interface {
+	Prune(audit.Retention) (int64, error)
+}
+
+// startRetention trims audit records at startup and then on a fixed interval
+// according to the configured retention policy. It is a no-op when no policy is
+// set or the active store does not support pruning. Prune failures are logged and
+// never block the request path or abort shutdown.
+func (p *Proxy) startRetention(ctx context.Context) {
+	cfg := p.opts.Config.Audit.Retention
+	if cfg.MaxAgeDays <= 0 && cfg.MaxRows <= 0 {
+		return
+	}
+	pruner, ok := p.auditStore.(retentionPruner)
+	if !ok {
+		return
+	}
+	policy := audit.Retention{MaxAgeDays: cfg.MaxAgeDays, MaxRows: cfg.MaxRows}
+	if n, err := pruner.Prune(policy); err != nil {
+		log.Printf("warn: initial audit prune failed: %v", err)
+	} else if n > 0 {
+		log.Printf("audit: pruned %d records at startup", n)
+	}
+	go func() {
+		ticker := time.NewTicker(retentionInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if n, err := pruner.Prune(policy); err != nil {
+					log.Printf("warn: audit prune failed: %v", err)
+				} else if n > 0 {
+					log.Printf("audit: pruned %d records", n)
+				}
+			}
+		}
+	}()
+}
+
+// retentionInterval is how often the background audit pruner runs.
+const retentionInterval = time.Hour

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/fs"
+	"net"
 	"net/http"
 	"strings"
 
@@ -26,6 +27,19 @@ type Status struct {
 	SSEURL          string `json:"sse_url"`          // endpoint for MCP clients, e.g. http://localhost:8081/sse
 	ConsoleURL      string `json:"console_url"`      // this web console, e.g. http://localhost:8080/
 	AdminPort       int    `json:"admin_port"`
+	// PID / StartedAt identify the process actually serving this console. Several
+	// mcp-arc instances can run side by side (each on its own port), so an
+	// operator needs a way to tell a live instance from a stale browser tab or a
+	// leftover process. The console prints both.
+	PID       int    `json:"pid"`
+	StartedAt string `json:"started_at"` // RFC3339
+	// AuditDriver is the active audit backend: "sqlite" | "postgres" | "memory".
+	// "memory" is non-persistent — records are gone as soon as the process exits,
+	// which is the usual reason a console looks empty after a restart.
+	AuditDriver string `json:"audit_driver"`
+	// ConfigDir is the directory of the config file the process loaded, so the
+	// operator can confirm which config (and therefore which upstream) is live.
+	ConfigDir string `json:"config_dir,omitempty"`
 }
 
 type Server struct {
@@ -41,11 +55,32 @@ func New(store audit.Store, token string, replayer Replayer, rules RuleManager) 
 	return &Server{store: store, token: token, replayer: replayer, rules: rules}
 }
 
+// Start binds port and serves the console. It is kept for tests and for the
+// embedded fallback path; production callers should prefer StartListener so the
+// port is reserved atomically before the server runs (see cmd/mcp-arc).
 func (s *Server) Start(port int) error {
+	ln, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
+	if err != nil {
+		return err
+	}
+	return s.Serve(ln)
+}
+
+// StartListener serves the console on an already-bound listener. main.go reserves
+// the port (holding the socket) before launching the proxy, so two instances can
+// never race for the same admin port.
+func (s *Server) StartListener(ln net.Listener) error {
+	return s.Serve(ln)
+}
+
+// Serve handles requests on ln until it closes. The handler map is rebuilt per
+// call so each server instance owns its own mux.
+func (s *Server) Serve(ln net.Listener) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/logs", s.auth(s.handleLogs))
 	mux.HandleFunc("/api/stats", s.auth(s.handleStats))
 	mux.HandleFunc("/api/replay", s.auth(s.handleReplay))
+	mux.HandleFunc("/api/replay/batch", s.auth(s.handleReplayBatch))
 	mux.HandleFunc("/api/export", s.auth(s.handleExport))
 	mux.HandleFunc("/api/rules", s.auth(s.handleRules))
 	mux.HandleFunc("/api/rules/{id}", s.auth(s.handleRuleByID))
@@ -67,7 +102,7 @@ func (s *Server) Start(port int) error {
 		fileServer.ServeHTTP(w, r)
 	})
 
-	return http.ListenAndServe(fmt.Sprintf(":%d", port), mux)
+	return http.Serve(ln, mux)
 }
 
 func (s *Server) auth(next http.HandlerFunc) http.HandlerFunc {
