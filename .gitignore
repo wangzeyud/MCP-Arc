@@ -22,5 +22,13 @@ config.local.yaml
 web/node_modules/
 web/dist/
 
+# editor / temp / backup files
+*~
+*.bak
+*.tmp
+*.orig
+*.rej
+*.swp
+
 # os
 .DS_Store
