@@ -19,6 +19,12 @@ type Replayer interface {
 	Replay(ctx context.Context, toolName string, rawParams []byte) ([]byte, error)
 }
 
+// Reloader triggers a runtime config reload (v0.7). It is satisfied by
+// *proxy.Proxy, keeping admin decoupled from the proxy package.
+type Reloader interface {
+	ReloadConfig() error
+}
+
 // Status is runtime information surfaced to the console so the user can see
 // which address to paste into their MCP client. Ports may differ from the
 // configured defaults when the preferred ones were already in use.
@@ -47,12 +53,13 @@ type Server struct {
 	token    string
 	replayer Replayer
 	rules    RuleManager
+	reloader Reloader
 	// Status is set by the caller before Start and exposed via /api/status.
 	Status Status
 }
 
-func New(store audit.Store, token string, replayer Replayer, rules RuleManager) *Server {
-	return &Server{store: store, token: token, replayer: replayer, rules: rules}
+func New(store audit.Store, token string, replayer Replayer, rules RuleManager, reloader Reloader) *Server {
+	return &Server{store: store, token: token, replayer: replayer, rules: rules, reloader: reloader}
 }
 
 // Start binds port and serves the console. It is kept for tests and for the
@@ -85,6 +92,7 @@ func (s *Server) Serve(ln net.Listener) error {
 	mux.HandleFunc("/api/rules", s.auth(s.handleRules))
 	mux.HandleFunc("/api/rules/{id}", s.auth(s.handleRuleByID))
 	mux.HandleFunc("/api/status", s.auth(s.handleStatus))
+	mux.HandleFunc("/api/config/reload", s.auth(s.handleConfigReload))
 
 	// Serve the embedded web console (compiled into the binary by `npm run build`).
 	sub, err := fs.Sub(web.DistFS, "dist")

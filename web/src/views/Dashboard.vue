@@ -53,19 +53,20 @@
       </el-col>
       <el-col :span="6">
         <el-card>
-          <el-statistic title="Avg Latency (ms)" :value="round1(stats.avg_latency_ms)" />
-          <div v-if="subMillisecond" style="margin-top: 4px; font-size: 12px; color: #909399">
-            sub-millisecond calls record as 0
+          <el-statistic title="Latency P50 (µs)" :value="stats.latency_p50_us" />
+          <div style="margin-top: 4px; font-size: 12px; color: #606266">
+            P50 {{ stats.latency_p50_us }} · P95 {{ stats.latency_p95_us }} · P99
+            {{ stats.latency_p99_us }} µs
           </div>
         </el-card>
       </el-col>
     </el-row>
 
     <el-row :gutter="16" style="margin-top: 16px">
-      <el-col :span="8">
+      <el-col :span="6">
         <el-card><el-statistic title="Distinct Tools" :value="distinctTools" /></el-card>
       </el-col>
-      <el-col :span="16">
+      <el-col :span="18">
         <el-card style="height: 100%">
           <template #header>Calls per tool</template>
           <div v-if="!toolRows.length" style="color: #909399; font-size: 13px">No data yet</div>
@@ -79,6 +80,35 @@
         </el-card>
       </el-col>
     </el-row>
+
+    <el-row :gutter="16" style="margin-top: 16px">
+      <el-col :span="12">
+        <el-card style="height: 100%">
+          <template #header>By client</template>
+          <div v-if="!clientRows.length" style="color: #909266; font-size: 13px">No data yet</div>
+          <div v-for="c in clientRows" :key="c.name" style="margin-bottom: 8px">
+            <div style="display: flex; justify-content: space-between; font-size: 13px">
+              <span>{{ c.name }}</span>
+              <span style="color: #606266">{{ c.count }}</span>
+            </div>
+            <el-progress :percentage="c.pct" :show-text="false" :stroke-width="8" />
+          </div>
+        </el-card>
+      </el-col>
+      <el-col :span="12">
+        <el-card style="height: 100%">
+          <template #header>Daily calls</template>
+          <div v-if="!seriesRows.length" style="color: #909266; font-size: 13px">No data yet</div>
+          <div v-for="d in seriesRows" :key="d.bucket" style="margin-bottom: 8px">
+            <div style="display: flex; justify-content: space-between; font-size: 13px">
+              <span>{{ d.bucket }}</span>
+              <span style="color: #606266">{{ d.count }}</span>
+            </div>
+            <el-progress :percentage="d.pct" :show-text="false" :stroke-width="8" />
+          </div>
+        </el-card>
+      </el-col>
+    </el-row>
   </div>
 </template>
 
@@ -86,7 +116,19 @@
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { errorText, fetchStats, fetchStatus, type Stats, type Status } from '../api'
 
-const stats = ref<Stats>({ total_calls: 0, error_count: 0, avg_latency_ms: 0, tool_counts: {} })
+const stats = ref<Stats>({
+  total_calls: 0,
+  error_count: 0,
+  error_rate: 0,
+  avg_latency_ms: 0,
+  avg_latency_us: 0,
+  latency_p50_us: 0,
+  latency_p95_us: 0,
+  latency_p99_us: 0,
+  tool_counts: {},
+  client_counts: {},
+  series: [],
+})
 const status = ref<Partial<Status>>({})
 const loading = ref(false)
 const error = ref('')
@@ -99,9 +141,6 @@ const errorRate = computed(() => {
   return Math.round((stats.value.error_count / stats.value.total_calls) * 1000) / 10
 })
 const distinctTools = computed(() => Object.keys(stats.value.tool_counts || {}).length)
-// A fast local tool answers in well under a millisecond, so latency_ms is 0 and
-// an unqualified "0 ms" reads like a broken metric. Flag it instead.
-const subMillisecond = computed(() => stats.value.total_calls > 0 && stats.value.avg_latency_ms === 0)
 
 const toolRows = computed(() => {
   const entries = Object.entries(stats.value.tool_counts || {})
@@ -112,7 +151,21 @@ const toolRows = computed(() => {
     .map(([name, count]) => ({ name, count, pct: max ? Math.round((count / max) * 100) : 0 }))
 })
 
-const round1 = (n: number) => Math.round((n || 0) * 10) / 10
+const clientRows = computed(() => {
+  const entries = Object.entries(stats.value.client_counts || {})
+  if (!entries.length) return []
+  const max = Math.max(...entries.map(([, c]) => c))
+  return entries
+    .sort((a, b) => b[1] - a[1])
+    .map(([name, count]) => ({ name, count, pct: max ? Math.round((count / max) * 100) : 0 }))
+})
+
+const seriesRows = computed(() => {
+  const rows = (stats.value.series || []).slice().sort((a, b) => a.bucket.localeCompare(b.bucket))
+  if (!rows.length) return []
+  const max = Math.max(...rows.map((r) => r.count))
+  return rows.map((r) => ({ bucket: r.bucket, count: r.count, pct: max ? Math.round((r.count / max) * 100) : 0 }))
+})
 
 function copy(text: string) {
   if (text) navigator.clipboard?.writeText(text)

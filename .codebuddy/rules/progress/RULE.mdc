@@ -1,5 +1,5 @@
 ---
-description: 版本进度表（v0.1–v0.6），确认改动落在正确版本范围、不超范围。v0.5 为规范对齐（MCP 2026-07-28），v0.6 为四件套打磨（回放增强+审计保留）。
+description: 版本进度表（v0.1–v0.7），确认改动落在正确版本范围、不超范围。v0.5 为规范对齐（MCP 2026-07-28），v0.6 为四件套打磨（回放增强+审计保留），v0.7 为交付增强（配置热加载+告警 webhook+统计增强）。
 alwaysApply: false
 enabled: true
 updatedAt: 2026-09-21T11:00:00.000Z
@@ -16,8 +16,9 @@ provider:
 | v0.4 | ✅ 完成 | 稳定性 / soak 测试 + race 验证（内部质量，非新功能） |
 | v0.5 | ✅ 已完成 | 规范对齐（MCP 2026-07-28）：新增 Streamable HTTP 传输（client+upstream，T1–T3）、方法无关透传、通知作用域与取消传播（T4–T5）、InputRequiredResult 审计/不嵌套脱敏（T6）、传输单测+soak 变体（T7）、文档/规则更新（T8）；SSE 标记 legacy。详见 `docs/v0.5-plan.md`。**T5 已完成并验证**：客户端断开→代理主动取消在途上游请求，已由真实代理级 E2E 测试 `TestE2EStreamableHTTPProxyCancelOnClientDisconnect` 覆盖。 |
 | v0.6 | ✅ 已完成 | 四件套打磨：**回放增强**——批量回放 API `/api/replay/batch`（按 id 列表或过滤器解析，顺序执行、单条失败不中断）+ 结果 Diff（exact JSON 比对，验证上游是否仍返回一致结果）；**审计保留**——`audit.retention`（`max_age_days`/`max_rows`，默认关闭、向后兼容），启动裁剪 + 周期后台清理 worker（跨 SQLite/PG/Memory，失败 fail-open 不阻塞主流程）；控制台 Logs 页支持多选回放 + Diff 面板。测试：audit/内存/代理三级 retention 单测、admin 批量回放单测。 |
+| v0.7 | ✅ 已完成 | 交付增强：**配置热加载**——`config.Manager`（原子替换 + mtime 轮询 + OnReload 回调）+ `ratelimit.Reload` + 保留策略热加载 + `POST /api/config/reload`（单测通过）；**告警 webhook**——`alerting` 包（HMAC-SHA256 签名 + 异步 fail-open），5 类事件 `config_reloaded`/`restart_required`/`sensitive_detected`/`rate_limited`/`audit_error` 全部接入；**统计增强**——`latency_us` 列 + `computeStats` 统一聚合（P50/P95/P99 µs + 错误率 + 按 client/tool 维度 + 每日时间序列），前端重写展示。测试：config 热加载单测、alerting 发送/签名/失败单测、统计聚合单测。 |
 
-> v0.5/v0.6 均限制在四件套 + 观测 UI + 交付/安全加固范围内。新改动如属于"配置热加载/告警 webhook/统计增强/7×24 soak"等曾被推迟项，需先确认其目标版本，不得擅自塞入后续迭代。
+> v0.7 已确认目标版本，承接上述"配置热加载 / 告警 webhook / 统计增强"三项曾被推迟的改动（7×24 soak 仍属更后面版本，未纳入 v0.7）。新增改动若不属于这三项，需先确认其是否划入 v0.7，不得擅自塞入。
 
 > **近期修复（会话内，未计入版本表）**：
 > - **proxy stdio 启动竞态（第二节）**：客户端（Cherry Studio/Claude Desktop/Cursor）拉起 mcp-arc 即发 `initialize`，但上游子进程尚未连上，`writeUpstream` 直接返回 `upstream not connected`，握手判死。改为**首次连接前有限等待（10s）连上即转发、之后仍 fail-fast**（不阻塞重连间隙），配套 `internal/proxy/upstream_ready_test.go`。

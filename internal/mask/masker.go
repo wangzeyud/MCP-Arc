@@ -63,6 +63,11 @@ type Masker struct {
 	rules        []Rule
 	detector     Detector
 	detectResult bool
+	// detectHook, when set, is invoked with the findings the second-pass detector
+	// made on top of the static rules (i.e. sensitive data the rules missed). It is
+	// invoked best-effort and must never affect masking; the proxy uses it to raise
+	// a "sensitive_detected" alert so an operator can tighten the policy.
+	detectHook func(findings []Finding)
 }
 
 // New builds a Masker from rule specs.
@@ -110,6 +115,14 @@ func (m *Masker) SetDetector(d Detector, applyToResult bool) {
 	m.mu.Unlock()
 }
 
+// SetDetectHook installs a callback fired with the second-pass detector's findings.
+// Pass nil to clear. The hook runs best-effort and must not affect masking.
+func (m *Masker) SetDetectHook(fn func(findings []Finding)) {
+	m.mu.Lock()
+	m.detectHook = fn
+	m.mu.Unlock()
+}
+
 // Mask returns a deep-copied, masked version of params, running the detector
 // second pass when configured.
 func (m *Masker) Mask(params map[string]any) (map[string]any, error) {
@@ -131,6 +144,7 @@ func (m *Masker) mask(v map[string]any, isParams bool) (map[string]any, error) {
 	rules := m.rules
 	det := m.detector
 	wantDetect := m.detector != nil && (isParams || m.detectResult)
+	hook := m.detectHook
 	m.mu.RUnlock()
 
 	m.maskValue(out, "", rules)
@@ -143,6 +157,11 @@ func (m *Masker) mask(v map[string]any, isParams bool) (map[string]any, error) {
 					continue
 				}
 				setPath(out, f.Path, DefaultMaskChar)
+			}
+			// Surface anything the static rules missed so an operator can tighten
+			// the policy. Fail-open: the hook must never affect masking.
+			if len(findings) > 0 && hook != nil {
+				hook(findings)
 			}
 		}
 	}

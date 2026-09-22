@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/wangzeyud/mcp-arc/internal/admin"
+	"github.com/wangzeyud/mcp-arc/internal/alerting"
 	"github.com/wangzeyud/mcp-arc/internal/audit"
 	"github.com/wangzeyud/mcp-arc/internal/config"
 	"github.com/wangzeyud/mcp-arc/internal/mask"
@@ -36,7 +37,8 @@ var procStartedAt = time.Now()
 
 type Options struct {
 	UpstreamCmd []string
-	Config      *config.Config
+	Config      *config.Config // initial snapshot (tests / fallback)
+	ConfigMgr   *config.Manager // hot-reloadable source of truth (v0.7)
 	// SSEURL / ConsoleURL are the effective (possibly auto-adjusted) addresses
 	// surfaced in the console. SSEURL holds the client endpoint (SSE or
 	// Streamable HTTP); it is empty only when the client transport is "stdio".
@@ -61,6 +63,7 @@ type Proxy struct {
 	auditCh     chan *audit.CallRecord // async write buffer; nil → synchronous insert
 	masker      *mask.Masker
 	limiter     *ratelimit.TokenBucketManager
+	alertSender *alerting.Sender
 	clientID    string
 
 	upstreamWriter   func([]byte) error
@@ -84,19 +87,27 @@ type Proxy struct {
 	upstreamMu sync.RWMutex
 	seq        atomic.Int64
 	pending    map[string]*pendingCall
+
+	// restartFP records the restart fingerprint of the last applied config so a
+	// reload that touches restart-required fields can be flagged.
+	restartFP string
 }
 
 func New(opts Options) *Proxy {
+	cfg := opts.Config
+	if opts.ConfigMgr != nil {
+		cfg = opts.ConfigMgr.Get()
+	}
 	p := &Proxy{
 		opts:          opts,
-		clientID:      opts.Config.Server.ClientID,
-		auditWrites:   opts.Config.Audit.Enabled,
+		clientID:      cfg.Server.ClientID,
+		auditWrites:   cfg.Audit.Enabled,
 		pending:       make(map[string]*pendingCall),
 		upstreamReady: make(chan struct{}),
 	}
 	// Config guarantees a positive default; guard anyway against a 0 that would
 	// make the first-connect wait instant.
-	uct := opts.Config.Server.UpstreamConnectTimeoutMs
+	uct := cfg.Server.UpstreamConnectTimeoutMs
 	if uct <= 0 {
 		uct = 30000
 	}
@@ -104,8 +115,8 @@ func New(opts Options) *Proxy {
 
 	// One store backs both call records and masking rules, so the console can
 	// edit rules without a second connection (or a second SQLite file lock).
-	if opts.Config.Audit.Enabled || opts.Config.Masking.Enabled {
-		store, err := audit.NewStore(opts.Config.Audit.Driver, opts.Config.Audit.DSN)
+	if cfg.Audit.Enabled || cfg.Masking.Enabled {
+		store, err := audit.NewStore(cfg.Audit.Driver, cfg.Audit.DSN)
 		if err != nil {
 			log.Printf("warn: store init failed: %v", err)
 		} else {
@@ -113,7 +124,7 @@ func New(opts Options) *Proxy {
 		}
 	}
 
-	if opts.Config.Masking.Enabled {
+	if cfg.Masking.Enabled {
 		m, err := mask.New(nil)
 		if err != nil {
 			log.Printf("warn: masker init failed: %v", err)
@@ -125,15 +136,43 @@ func New(opts Options) *Proxy {
 				_ = m.Update(p.configSpecs())
 			}
 			p.initDetector(m)
+			m.SetDetectHook(func(findings []mask.Finding) {
+				if p.alertSender == nil {
+					return
+				}
+				items := make([]map[string]string, 0, len(findings))
+				for _, f := range findings {
+					items = append(items, map[string]string{"path": f.Path, "type": f.Type})
+				}
+				p.alertSender.Send(alerting.EventSensitiveDetected, map[string]any{
+					"findings": items,
+				})
+			})
 		}
 	}
 
 	p.limiter = ratelimit.NewTokenBucketManager(
-		opts.Config.RateLimit.QPS,
-		opts.Config.RateLimit.DailyQuota,
-		opts.Config.RateLimit.Enabled,
+		cfg.RateLimit.QPS,
+		cfg.RateLimit.DailyQuota,
+		cfg.RateLimit.Enabled,
 	)
+	p.alertSender = alerting.New(cfg.Alerting)
+	// Config hot-reload (v0.7): re-apply live config to the rate limiter, masker
+	// and retention worker whenever the file changes (watcher or POST /api/config/reload).
+	if p.opts.ConfigMgr != nil {
+		p.restartFP = config.RestartFingerprint(p.cfg())
+		p.opts.ConfigMgr.OnReload(p.onConfigReload)
+	}
 	return p
+}
+
+// cfg returns the active configuration, preferring the hot-reloadable Manager when
+// present and falling back to the initial snapshot otherwise.
+func (p *Proxy) cfg() *config.Config {
+	if p.opts.ConfigMgr != nil {
+		return p.opts.ConfigMgr.Get()
+	}
+	return p.opts.Config
 }
 
 // Run wires up the client and upstream transports and pumps messages between
@@ -149,6 +188,12 @@ func (p *Proxy) Run() error {
 func (p *Proxy) run(parent context.Context) error {
 	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
+
+	// Config hot-reload poller (v0.7): watches the config file and swaps in new
+	// values without a restart. Stops with the process.
+	if p.opts.ConfigMgr != nil {
+		p.opts.ConfigMgr.Start(ctx)
+	}
 
 	// Audit writes are offloaded to a buffered channel + background worker so a
 	// slow or hung database can never stall the response path.
@@ -167,20 +212,20 @@ func (p *Proxy) run(parent context.Context) error {
 	// The upstream may die at any time; upstreamSupervisor recreates it on every
 	// failure, so we keep a factory rather than a single live connection.
 	var upstreamFactory func() (transport.UpstreamTransporter, error)
-	switch p.opts.Config.Transport.Upstream {
+	switch p.cfg().Transport.Upstream {
 	case "sse":
-		if p.opts.Config.Transport.UpstreamURL == "" {
+		if p.cfg().Transport.UpstreamURL == "" {
 			return errors.New("transport.upstream_url is required when upstream = sse")
 		}
-		url := p.opts.Config.Transport.UpstreamURL
+		url := p.cfg().Transport.UpstreamURL
 		upstreamFactory = func() (transport.UpstreamTransporter, error) {
 			return transport.NewSSEUpstream(url), nil
 		}
 	case "streamable-http":
-		if p.opts.Config.Transport.UpstreamURL == "" {
+		if p.cfg().Transport.UpstreamURL == "" {
 			return errors.New("transport.upstream_url is required when upstream = streamable-http")
 		}
-		url := p.opts.Config.Transport.UpstreamURL
+		url := p.cfg().Transport.UpstreamURL
 		upstreamFactory = func() (transport.UpstreamTransporter, error) {
 			return transport.NewStreamableHTTPUpstream(url), nil
 		}
@@ -196,13 +241,13 @@ func (p *Proxy) run(parent context.Context) error {
 
 	// --- client transport ---
 	var client transport.ClientTransporter
-	switch p.opts.Config.Transport.Client {
+	switch p.cfg().Transport.Client {
 	case "sse":
-		client = transport.NewSSEServer(p.opts.Config.Transport.Listen)
-		log.Printf("mcp-arc: SSE client transport listening on %s", p.opts.Config.Transport.Listen)
+		client = transport.NewSSEServer(p.cfg().Transport.Listen)
+		log.Printf("mcp-arc: SSE client transport listening on %s", p.cfg().Transport.Listen)
 	case "streamable-http":
-		client = transport.NewStreamableHTTPClient(p.opts.Config.Transport.Listen, p.opts.Config.Transport.StreamableHTTPPath)
-		log.Printf("mcp-arc: Streamable HTTP client transport listening on %s%s", p.opts.Config.Transport.Listen, p.opts.Config.Transport.StreamableHTTPPath)
+		client = transport.NewStreamableHTTPClient(p.cfg().Transport.Listen, p.cfg().Transport.StreamableHTTPPath)
+		log.Printf("mcp-arc: Streamable HTTP client transport listening on %s%s", p.cfg().Transport.Listen, p.cfg().Transport.StreamableHTTPPath)
 	default: // stdio
 		client = transport.StdioClient{}
 	}
@@ -217,24 +262,24 @@ func (p *Proxy) run(parent context.Context) error {
 		p.clientBroadcast = transport.StdioClient{}.Broadcast
 	}
 
-	if p.opts.Config.Admin.Enabled {
+	if p.cfg().Admin.Enabled {
 		go func() {
-			srv := admin.New(p.auditStore, p.opts.Config.Admin.Token, p, p)
+			srv := admin.New(p.auditStore, p.cfg().Admin.Token, p, p, p)
 			srv.Status = admin.Status{
-				ClientTransport: p.opts.Config.Transport.Client,
+				ClientTransport: p.cfg().Transport.Client,
 				SSEURL:          p.opts.SSEURL,
 				ConsoleURL:      p.opts.ConsoleURL,
-				AdminPort:       p.opts.Config.Admin.Port,
+				AdminPort:       p.cfg().Admin.Port,
 				PID:             os.Getpid(),
 				StartedAt:       procStartedAt.Format(time.RFC3339),
-				AuditDriver:     p.opts.Config.Audit.Driver,
-				ConfigDir:       p.opts.Config.ConfigDir,
+				AuditDriver:     p.cfg().Audit.Driver,
+				ConfigDir:       p.cfg().ConfigDir,
 			}
 			var e error
 			if p.opts.AdminListener != nil {
 				e = srv.StartListener(p.opts.AdminListener)
 			} else {
-				e = srv.Start(p.opts.Config.Admin.Port)
+				e = srv.Start(p.cfg().Admin.Port)
 			}
 			if e != nil {
 				log.Printf("warn: admin server stopped: %v", e)
@@ -257,7 +302,7 @@ func (p *Proxy) run(parent context.Context) error {
 		}
 	}()
 
-	log.Printf("mcp-arc: running (client=%s, upstream=%s)", p.opts.Config.Transport.Client, p.opts.Config.Transport.Upstream)
+	log.Printf("mcp-arc: running (client=%s, upstream=%s)", p.cfg().Transport.Client, p.cfg().Transport.Upstream)
 	// Reap requests the upstream never answered, so a dead or hung upstream
 	// cannot grow p.pending without bound.
 	go p.sweepPending(ctx)
@@ -417,9 +462,34 @@ type retentionPruner interface {
 // startRetention trims audit records at startup and then on a fixed interval
 // according to the configured retention policy. It is a no-op when no policy is
 // set or the active store does not support pruning. Prune failures are logged and
-// never block the request path or abort shutdown.
+// never block the request path or abort shutdown. The policy is read live from the
+// active config each pass, so retention changes apply without a restart (v0.7).
 func (p *Proxy) startRetention(ctx context.Context) {
-	cfg := p.opts.Config.Audit.Retention
+	if p.auditStore == nil {
+		return
+	}
+	p.pruneNow()
+	go func() {
+		ticker := time.NewTicker(retentionInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				p.pruneNow()
+			}
+		}
+	}()
+}
+
+// pruneNow trims audit records according to the currently active retention policy.
+// No-op when no policy is set or the store does not support pruning.
+func (p *Proxy) pruneNow() {
+	if p.auditStore == nil {
+		return
+	}
+	cfg := p.cfg().Audit.Retention
 	if cfg.MaxAgeDays <= 0 && cfg.MaxRows <= 0 {
 		return
 	}
@@ -429,26 +499,54 @@ func (p *Proxy) startRetention(ctx context.Context) {
 	}
 	policy := audit.Retention{MaxAgeDays: cfg.MaxAgeDays, MaxRows: cfg.MaxRows}
 	if n, err := pruner.Prune(policy); err != nil {
-		log.Printf("warn: initial audit prune failed: %v", err)
+		log.Printf("warn: audit prune failed: %v", err)
 	} else if n > 0 {
-		log.Printf("audit: pruned %d records at startup", n)
+		log.Printf("audit: pruned %d records", n)
 	}
-	go func() {
-		ticker := time.NewTicker(retentionInterval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				if n, err := pruner.Prune(policy); err != nil {
-					log.Printf("warn: audit prune failed: %v", err)
-				} else if n > 0 {
-					log.Printf("audit: pruned %d records", n)
-				}
-			}
+}
+
+// onConfigReload applies a freshly loaded configuration to the live components. It
+// is invoked by config.Manager.Reload (file watch or POST /api/config/reload).
+func (p *Proxy) onConfigReload(c *config.Config) {
+	p.limiter.Reload(c.RateLimit.QPS, c.RateLimit.DailyQuota, c.RateLimit.Enabled)
+	if c.Masking.Enabled && p.masker != nil {
+		if err := p.reloadRules(); err != nil {
+			log.Printf("warn: masker reload on config change failed: %v", err)
 		}
-	}()
+	}
+	p.pruneNow()
+
+	if p.alertSender != nil {
+		p.alertSender.Reload(c.Alerting)
+	}
+	restartNeeded := false
+	fp := config.RestartFingerprint(c)
+	if p.restartFP != "" && fp != p.restartFP {
+		restartNeeded = true
+		log.Printf("warn: config changed in fields that require a restart (transport / admin port / audit driver or DSN / upstream); restart mcp-arc to apply")
+	}
+	p.restartFP = fp
+
+	if p.alertSender != nil {
+		if restartNeeded {
+			p.alertSender.Send(alerting.EventRestartRequired, map[string]any{
+				"note": "restart-required fields changed; restart mcp-arc to apply",
+			})
+		} else {
+			p.alertSender.Send(alerting.EventConfigReloaded, map[string]any{
+				"rate_limit_qps": c.RateLimit.QPS,
+			})
+		}
+	}
+}
+
+// ReloadConfig triggers a runtime reload of the configuration file. It is exposed to
+// the console via POST /api/config/reload.
+func (p *Proxy) ReloadConfig() error {
+	if p.opts.ConfigMgr == nil {
+		return errors.New("config manager unavailable")
+	}
+	return p.opts.ConfigMgr.Reload()
 }
 
 // retentionInterval is how often the background audit pruner runs.

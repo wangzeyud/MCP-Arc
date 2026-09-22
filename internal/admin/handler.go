@@ -47,6 +47,25 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, stats)
 }
 
+// handleConfigReload triggers a runtime reload of the configuration file (v0.7).
+// It is exposed to the console so an operator can apply config edits without
+// restarting mcp-arc; file-watcher reloads happen automatically in the background.
+func (s *Server) handleConfigReload(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "use POST"})
+		return
+	}
+	if s.reloader == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "reload unavailable"})
+		return
+	}
+	if err := s.reloader.ReloadConfig(); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "reloaded"})
+}
+
 // handleReplay re-issues a recorded tools/call to the upstream server and returns
 // the raw upstream response. The recorded raw_params are used verbatim (unmasked)
 // so the replay faithfully reproduces the original request. When `diff: true` is

@@ -63,6 +63,17 @@ func main() {
 				cfg.Admin.Enabled = true
 			}
 
+			// Config hot-reload (v0.7): wrap the loaded config in a Manager that
+			// watches the file and atomically swaps in new values. CLI overrides
+			// below apply to this initial snapshot; a later file change makes the
+			// file the source of truth.
+			var cfgMgr *config.Manager
+			if path, ok := findConfigPath(configPath); ok {
+				cfgMgr = config.NewWatcherFromFile(path, cfg)
+			} else {
+				cfgMgr = config.NewManager(cfg)
+			}
+
 			// CLI overrides
 			if clientTransport != "" {
 				cfg.Transport.Client = clientTransport
@@ -109,6 +120,7 @@ func main() {
 			p := proxy.New(proxy.Options{
 				UpstreamCmd:   upstreamCmd,
 				Config:        cfg,
+				ConfigMgr:     cfgMgr,
 				ConfigDir:     cfg.ConfigDir,
 				SSEURL:        sseURL,
 				ConsoleURL:    consoleURL,

@@ -50,8 +50,15 @@ export interface CallRecord {
 export interface Stats {
   total_calls: number
   error_count: number
+  error_rate: number
   avg_latency_ms: number
+  avg_latency_us: number
+  latency_p50_us: number
+  latency_p95_us: number
+  latency_p99_us: number
   tool_counts: Record<string, number>
+  client_counts?: Record<string, number>
+  series?: { bucket: string; count: number }[]
 }
 
 export interface MaskRule {

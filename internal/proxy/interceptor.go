@@ -10,6 +10,7 @@ import (
 	"log"
 	"time"
 
+	"github.com/wangzeyud/mcp-arc/internal/alerting"
 	"github.com/wangzeyud/mcp-arc/internal/audit"
 	"github.com/wangzeyud/mcp-arc/internal/transport"
 )
@@ -83,6 +84,11 @@ func (p *Proxy) processClientMessage(raw []byte, respond func([]byte, bool) erro
 
 	// rate limit only tool calls
 	if isToolCall && !p.limiter.Allow(p.clientID) {
+		if p.alertSender != nil {
+			p.alertSender.Send(alerting.EventRateLimited, map[string]any{
+				"client_id": p.clientID,
+			})
+		}
 		resp := map[string]any{
 			"jsonrpc": "2.0",
 			"id":      id,
@@ -176,7 +182,9 @@ func (p *Proxy) processUpstreamMessage(raw []byte) error {
 	outRaw, _ := json.Marshal(msg)
 
 	if pc.toolName != "" {
-		latency := time.Since(pc.start).Milliseconds()
+		elapsed := time.Since(pc.start)
+		latency := elapsed.Milliseconds()
+		latencyUs := elapsed.Microseconds()
 		errMsg := ""
 		var result any
 		if e, ok := msg["error"].(map[string]any); ok {
@@ -213,6 +221,7 @@ func (p *Proxy) processUpstreamMessage(raw []byte) error {
 			RawResult: string(rawResultBytes),
 			ErrorMsg:  errMsg,
 			LatencyMs: latency,
+			LatencyUs: latencyUs,
 			Timestamp: time.Now(),
 		}
 		if p.auditWrites {

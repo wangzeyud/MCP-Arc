@@ -33,11 +33,11 @@ func specsFromConfig(rules []config.MaskRule) []mask.Spec {
 // configSpecs merges config.yaml rules with any referenced presets into masking
 // specs. User rules come first so they win on any overlap with a preset.
 func (p *Proxy) configSpecs() []mask.Spec {
-	specs := specsFromConfig(p.opts.Config.Masking.Rules)
-	if len(p.opts.Config.Masking.Presets) == 0 {
+	specs := specsFromConfig(p.cfg().Masking.Rules)
+	if len(p.cfg().Masking.Presets) == 0 {
 		return specs
 	}
-	presets, err := mask.PresetSpecs(p.opts.Config.Masking.Presets)
+	presets, err := mask.PresetSpecs(p.cfg().Masking.Presets)
 	if err != nil {
 		log.Printf("warn: %v", err)
 		return specs
@@ -115,7 +115,7 @@ func (p *Proxy) reloadRules() error {
 // initDetector wires the optional LLM second pass. A broken configuration only
 // disables the second pass — static masking keeps working.
 func (p *Proxy) initDetector(m *mask.Masker) {
-	cfg := p.opts.Config.LLM
+	cfg := p.cfg().LLM
 	if !cfg.Enabled {
 		return
 	}

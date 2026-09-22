@@ -68,6 +68,7 @@ func (s *PostgresStore) migrate() error {
 		`ALTER TABLE calls ADD COLUMN IF NOT EXISTS raw_params TEXT`,
 		`ALTER TABLE calls ADD COLUMN IF NOT EXISTS raw_result TEXT`,
 		`ALTER TABLE calls ADD COLUMN IF NOT EXISTS replay_of BIGINT`,
+		`ALTER TABLE calls ADD COLUMN IF NOT EXISTS latency_us BIGINT`,
 	} {
 		if _, err := s.db.Exec(ddl); err != nil {
 			return err
@@ -78,15 +79,15 @@ func (s *PostgresStore) migrate() error {
 
 func (s *PostgresStore) Insert(r *CallRecord) error {
 	_, err := s.db.Exec(
-		`INSERT INTO calls (client_id, tool_name, params, raw_params, raw_result, result, error_msg, latency_ms, timestamp, replay_of)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
-		r.ClientID, r.ToolName, r.Params, r.RawParams, r.RawResult, r.Result, r.ErrorMsg, r.LatencyMs, r.Timestamp, r.ReplayOf,
+		`INSERT INTO calls (client_id, tool_name, params, raw_params, raw_result, result, error_msg, latency_ms, latency_us, timestamp, replay_of)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+		r.ClientID, r.ToolName, r.Params, r.RawParams, r.RawResult, r.Result, r.ErrorMsg, r.LatencyMs, r.LatencyUs, r.Timestamp, r.ReplayOf,
 	)
 	return err
 }
 
 func (s *PostgresStore) Query(opts QueryOpts) ([]CallRecord, error) {
-	query := `SELECT id, client_id, tool_name, params, raw_params, raw_result, result, error_msg, latency_ms, timestamp, replay_of
+	query := `SELECT id, client_id, tool_name, params, raw_params, raw_result, result, error_msg, latency_ms, latency_us, timestamp, replay_of
 	          FROM calls WHERE 1=1`
 	var args []any
 	n := 0
@@ -124,7 +125,7 @@ func (s *PostgresStore) Query(opts QueryOpts) ([]CallRecord, error) {
 	for rows.Next() {
 		var r CallRecord
 		if err := rows.Scan(&r.ID, &r.ClientID, &r.ToolName, &r.Params, &r.RawParams, &r.RawResult,
-			&r.Result, &r.ErrorMsg, &r.LatencyMs, &r.Timestamp, &r.ReplayOf); err != nil {
+			&r.Result, &r.ErrorMsg, &r.LatencyMs, &r.LatencyUs, &r.Timestamp, &r.ReplayOf); err != nil {
 			return nil, err
 		}
 		out = append(out, r)
@@ -135,10 +136,10 @@ func (s *PostgresStore) Query(opts QueryOpts) ([]CallRecord, error) {
 func (s *PostgresStore) Get(id int64) (*CallRecord, error) {
 	var r CallRecord
 	err := s.db.QueryRow(
-		`SELECT id, client_id, tool_name, params, raw_params, raw_result, result, error_msg, latency_ms, timestamp, replay_of
+		`SELECT id, client_id, tool_name, params, raw_params, raw_result, result, error_msg, latency_ms, latency_us, timestamp, replay_of
 		 FROM calls WHERE id = $1`, id,
 	).Scan(&r.ID, &r.ClientID, &r.ToolName, &r.Params, &r.RawParams, &r.RawResult,
-		&r.Result, &r.ErrorMsg, &r.LatencyMs, &r.Timestamp, &r.ReplayOf)
+		&r.Result, &r.ErrorMsg, &r.LatencyMs, &r.LatencyUs, &r.Timestamp, &r.ReplayOf)
 	if err != nil {
 		return nil, err
 	}
@@ -146,10 +147,7 @@ func (s *PostgresStore) Get(id int64) (*CallRecord, error) {
 }
 
 func (s *PostgresStore) Stats(opts StatsOpts) (*Stats, error) {
-	stats := &Stats{ToolCounts: map[string]int64{}}
-	query := `SELECT COUNT(*),
-	                 COALESCE(SUM(CASE WHEN error_msg != '' THEN 1 ELSE 0 END), 0),
-	                 COALESCE(AVG(latency_ms), 0)
+	query := `SELECT latency_us, client_id, tool_name, error_msg, timestamp
 	          FROM calls WHERE 1=1`
 	var args []any
 	n := 0
@@ -164,24 +162,25 @@ func (s *PostgresStore) Stats(opts StatsOpts) (*Stats, error) {
 	if !opts.Until.IsZero() {
 		add("AND timestamp <= ?", opts.Until)
 	}
-	if err := s.db.QueryRow(query, args...).Scan(&stats.TotalCalls, &stats.ErrorCount, &stats.AvgLatencyMs); err != nil {
-		return nil, err
-	}
-
-	rows, err := s.db.Query(`SELECT tool_name, COUNT(*) FROM calls GROUP BY tool_name`)
+	rows, err := s.db.Query(query, args...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
+	recs := make([]statRow, 0)
 	for rows.Next() {
-		var name string
-		var cnt int64
-		if err := rows.Scan(&name, &cnt); err != nil {
+		var r statRow
+		var errMsg string
+		if err := rows.Scan(&r.LatencyUs, &r.ClientID, &r.ToolName, &errMsg, &r.Timestamp); err != nil {
 			return nil, err
 		}
-		stats.ToolCounts[name] = cnt
+		r.Error = errMsg != ""
+		recs = append(recs, r)
 	}
-	return stats, nil
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return computeStats(recs), nil
 }
 
 func (s *PostgresStore) Close() error {

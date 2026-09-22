@@ -82,3 +82,15 @@ admin:
   port: 8080
   token: "change-me"
   open_browser: false  # do not pop a browser on every launch; open http://localhost:8080 yourself when you want the console
+
+# 可选：v0.7 告警 webhook。敏感数据漏遮 / 限流超限 / 审计写入失败 / 配置热加载等事件
+# 会 POST 到下方 url（JSON body + X-MCPArc-Signature: sha256=<hmac> 签名）。
+# 失败一律 fail-open：端点故障绝不会阻塞请求或审计。enabled: false 时不发送。
+# alerting:
+#   enabled: true
+#   timeout_ms: 5000                       # 单次投递 HTTP 超时；0 => 5000
+#   # events 留空 = 全部发送；只想要其中几种时显式列出：
+#   # events: [sensitive_detected, rate_limited, audit_error]
+#   webhook:
+#     url: "https://my.example.com/mcp-arc-alerts"
+#     secret: "change-me-webhook-secret"  # HMAC-SHA256 密钥；留空则不签名

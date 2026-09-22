@@ -83,7 +83,7 @@ func (s *MemoryStore) Get(id int64) (*CallRecord, error) {
 func (s *MemoryStore) Stats(opts StatsOpts) (*Stats, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	stats := &Stats{ToolCounts: map[string]int64{}}
+	recs := make([]statRow, 0, len(s.calls))
 	for i := range s.calls {
 		r := s.calls[i]
 		if !opts.Since.IsZero() && r.Timestamp.Before(opts.Since) {
@@ -92,17 +92,15 @@ func (s *MemoryStore) Stats(opts StatsOpts) (*Stats, error) {
 		if !opts.Until.IsZero() && r.Timestamp.After(opts.Until) {
 			continue
 		}
-		stats.TotalCalls++
-		if r.ErrorMsg != "" {
-			stats.ErrorCount++
-		}
-		stats.AvgLatencyMs += float64(r.LatencyMs)
-		stats.ToolCounts[r.ToolName]++
+		recs = append(recs, statRow{
+			LatencyUs: r.LatencyUs,
+			ClientID:  r.ClientID,
+			ToolName:  r.ToolName,
+			Error:     r.ErrorMsg != "",
+			Timestamp: r.Timestamp,
+		})
 	}
-	if stats.TotalCalls > 0 {
-		stats.AvgLatencyMs /= float64(stats.TotalCalls)
-	}
-	return stats, nil
+	return computeStats(recs), nil
 }
 
 func (s *MemoryStore) ListRules() ([]MaskRule, error) {

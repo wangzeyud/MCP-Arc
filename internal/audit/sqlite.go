@@ -77,6 +77,7 @@ func (s *SQLiteStore) migrate() error {
 		`ALTER TABLE calls ADD COLUMN raw_params TEXT`,
 		`ALTER TABLE calls ADD COLUMN raw_result TEXT`,
 		`ALTER TABLE calls ADD COLUMN replay_of INTEGER`,
+		`ALTER TABLE calls ADD COLUMN latency_us INTEGER`,
 	} {
 		_, _ = s.db.Exec(ddl)
 	}
@@ -85,15 +86,15 @@ func (s *SQLiteStore) migrate() error {
 
 func (s *SQLiteStore) Insert(r *CallRecord) error {
 	_, err := s.db.Exec(
-		`INSERT INTO calls (client_id, tool_name, params, raw_params, raw_result, result, error_msg, latency_ms, timestamp, replay_of)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		r.ClientID, r.ToolName, r.Params, r.RawParams, r.RawResult, r.Result, r.ErrorMsg, r.LatencyMs, r.Timestamp, r.ReplayOf,
+		`INSERT INTO calls (client_id, tool_name, params, raw_params, raw_result, result, error_msg, latency_ms, latency_us, timestamp, replay_of)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		r.ClientID, r.ToolName, r.Params, r.RawParams, r.RawResult, r.Result, r.ErrorMsg, r.LatencyMs, r.LatencyUs, r.Timestamp, r.ReplayOf,
 	)
 	return err
 }
 
 func (s *SQLiteStore) Query(opts QueryOpts) ([]CallRecord, error) {
-	query := `SELECT id, client_id, tool_name, params, raw_params, raw_result, result, error_msg, latency_ms, timestamp, replay_of
+	query := `SELECT id, client_id, tool_name, params, raw_params, raw_result, result, error_msg, latency_ms, latency_us, timestamp, replay_of
 	          FROM calls WHERE 1=1`
 	var args []any
 	if opts.ClientID != "" {
@@ -129,7 +130,7 @@ func (s *SQLiteStore) Query(opts QueryOpts) ([]CallRecord, error) {
 	for rows.Next() {
 		var r CallRecord
 		if err := rows.Scan(&r.ID, &r.ClientID, &r.ToolName, &r.Params, &r.RawParams, &r.RawResult,
-			&r.Result, &r.ErrorMsg, &r.LatencyMs, &r.Timestamp, &r.ReplayOf); err != nil {
+			&r.Result, &r.ErrorMsg, &r.LatencyMs, &r.LatencyUs, &r.Timestamp, &r.ReplayOf); err != nil {
 			return nil, err
 		}
 		out = append(out, r)
@@ -140,10 +141,10 @@ func (s *SQLiteStore) Query(opts QueryOpts) ([]CallRecord, error) {
 func (s *SQLiteStore) Get(id int64) (*CallRecord, error) {
 	var r CallRecord
 	err := s.db.QueryRow(
-		`SELECT id, client_id, tool_name, params, raw_params, raw_result, result, error_msg, latency_ms, timestamp, replay_of
+		`SELECT id, client_id, tool_name, params, raw_params, raw_result, result, error_msg, latency_ms, latency_us, timestamp, replay_of
 		 FROM calls WHERE id = ?`, id,
 	).Scan(&r.ID, &r.ClientID, &r.ToolName, &r.Params, &r.RawParams, &r.RawResult,
-		&r.Result, &r.ErrorMsg, &r.LatencyMs, &r.Timestamp, &r.ReplayOf)
+		&r.Result, &r.ErrorMsg, &r.LatencyMs, &r.LatencyUs, &r.Timestamp, &r.ReplayOf)
 	if err != nil {
 		return nil, err
 	}
@@ -151,10 +152,7 @@ func (s *SQLiteStore) Get(id int64) (*CallRecord, error) {
 }
 
 func (s *SQLiteStore) Stats(opts StatsOpts) (*Stats, error) {
-	stats := &Stats{ToolCounts: map[string]int64{}}
-	query := `SELECT COUNT(*),
-	                 COALESCE(SUM(CASE WHEN error_msg != '' THEN 1 ELSE 0 END), 0),
-	                 COALESCE(AVG(latency_ms), 0)
+	query := `SELECT latency_us, client_id, tool_name, error_msg, timestamp
 	          FROM calls WHERE 1=1`
 	var args []any
 	if !opts.Since.IsZero() {
@@ -165,24 +163,25 @@ func (s *SQLiteStore) Stats(opts StatsOpts) (*Stats, error) {
 		query += " AND timestamp <= ?"
 		args = append(args, opts.Until)
 	}
-	if err := s.db.QueryRow(query, args...).Scan(&stats.TotalCalls, &stats.ErrorCount, &stats.AvgLatencyMs); err != nil {
-		return nil, err
-	}
-
-	rows, err := s.db.Query(`SELECT tool_name, COUNT(*) FROM calls GROUP BY tool_name`)
+	rows, err := s.db.Query(query, args...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
+	recs := make([]statRow, 0)
 	for rows.Next() {
-		var name string
-		var cnt int64
-		if err := rows.Scan(&name, &cnt); err != nil {
+		var r statRow
+		var errMsg string
+		if err := rows.Scan(&r.LatencyUs, &r.ClientID, &r.ToolName, &errMsg, &r.Timestamp); err != nil {
 			return nil, err
 		}
-		stats.ToolCounts[name] = cnt
+		r.Error = errMsg != ""
+		recs = append(recs, r)
 	}
-	return stats, nil
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return computeStats(recs), nil
 }
 
 func (s *SQLiteStore) Close() error {

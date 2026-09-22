@@ -5,6 +5,7 @@ import (
 	"log"
 	"time"
 
+	"github.com/wangzeyud/mcp-arc/internal/alerting"
 	"github.com/wangzeyud/mcp-arc/internal/audit"
 )
 
@@ -30,6 +31,11 @@ func (p *Proxy) enqueueAudit(rec *audit.CallRecord) {
 	}
 	if err := p.auditStore.Insert(rec); err != nil {
 		log.Printf("warn: audit insert failed: %v", err)
+		if p.alertSender != nil {
+			p.alertSender.Send(alerting.EventAuditError, map[string]any{
+				"error": err.Error(),
+			})
+		}
 	}
 }
 
@@ -85,6 +91,11 @@ func (p *Proxy) insertAuditRecord(rec *audit.CallRecord, timeout time.Duration) 
 	case err := <-done:
 		if err != nil {
 			log.Printf("warn: audit insert failed: %v", err)
+			if p.alertSender != nil {
+				p.alertSender.Send(alerting.EventAuditError, map[string]any{
+					"error": err.Error(),
+				})
+			}
 		}
 	case <-time.After(timeout):
 		log.Printf("warn: audit insert timed out after %s, dropping call record", timeout)
@@ -92,22 +103,22 @@ func (p *Proxy) insertAuditRecord(rec *audit.CallRecord, timeout time.Duration) 
 }
 
 func (p *Proxy) auditQueueSize() int {
-	if p.opts.Config != nil && p.opts.Config.Audit.QueueSize > 0 {
-		return p.opts.Config.Audit.QueueSize
+	if p.cfg() != nil && p.cfg().Audit.QueueSize > 0 {
+		return p.cfg().Audit.QueueSize
 	}
 	return 1024
 }
 
 func (p *Proxy) auditWriteTimeout() time.Duration {
-	if p.opts.Config != nil && p.opts.Config.Audit.WriteTimeoutMs > 0 {
-		return time.Duration(p.opts.Config.Audit.WriteTimeoutMs) * time.Millisecond
+	if p.cfg() != nil && p.cfg().Audit.WriteTimeoutMs > 0 {
+		return time.Duration(p.cfg().Audit.WriteTimeoutMs) * time.Millisecond
 	}
 	return 2 * time.Second
 }
 
 func (p *Proxy) auditShutdownTimeout() time.Duration {
-	if p.opts.Config != nil && p.opts.Config.Audit.ShutdownFlushTimeoutMs > 0 {
-		return time.Duration(p.opts.Config.Audit.ShutdownFlushTimeoutMs) * time.Millisecond
+	if p.cfg() != nil && p.cfg().Audit.ShutdownFlushTimeoutMs > 0 {
+		return time.Duration(p.cfg().Audit.ShutdownFlushTimeoutMs) * time.Millisecond
 	}
 	return 5 * time.Second
 }

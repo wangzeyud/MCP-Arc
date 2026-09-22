@@ -98,7 +98,7 @@ func (f *fakeStore) DeleteRule(int64) error                 { return nil }
 
 func newTestServer(t *testing.T, rp Replayer) (*Server, func()) {
 	t.Helper()
-	s := New(newFakeStore(), "", rp, nil)
+	s := New(newFakeStore(), "", rp, nil, nil)
 	return s, func() {}
 }
 

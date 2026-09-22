@@ -17,6 +17,7 @@ type Config struct {
 	LLM       LLMConfig       `yaml:"llm"`
 	RateLimit RateLimitConfig `yaml:"rate_limit"`
 	Admin     AdminConfig     `yaml:"admin"`
+	Alerting  AlertingConfig  `yaml:"alerting"`
 	// ConfigDir is the directory of the loaded config file. It is set by Load
 	// (not from YAML) and is used to anchor relative paths in server.upstream,
 	// so a single binary plus config work regardless of the CWD the MCP client
@@ -119,6 +120,26 @@ type AdminConfig struct {
 	Port        int    `yaml:"port"`
 	Token       string `yaml:"token"`
 	OpenBrowser bool   `yaml:"open_browser"` // auto-open the web console in the default browser on startup
+}
+
+// AlertingConfig drives outbound notifications (v0.7). The only sink today is an
+// HTTP webhook; events are POSTed as JSON with an HMAC-SHA256 signature. Sending
+// is always best-effort and fail-open: a broken or slow endpoint never blocks the
+// request path or audit writes.
+type AlertingConfig struct {
+	Enabled   bool            `yaml:"enabled"`
+	Webhook   WebhookConfig   `yaml:"webhook"`
+	// Events selects which alert types to dispatch. Empty means "all".
+	// Known types: config_reloaded, restart_required, sensitive_detected,
+	// rate_limited, audit_error.
+	Events    []string `yaml:"events"`
+	TimeoutMs int      `yaml:"timeout_ms"` // per-delivery HTTP timeout; 0 → 5000
+}
+
+// WebhookConfig is the destination for alert deliveries.
+type WebhookConfig struct {
+	URL    string `yaml:"url"`
+	Secret string `yaml:"secret"` // HMAC-SHA256 key; empty disables signing
 }
 
 func Load(path string) (*Config, error) {

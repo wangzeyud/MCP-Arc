@@ -40,6 +40,20 @@ func NewTokenBucketManager(qps float64, dailyQuota int, enabled bool) *TokenBuck
 	}
 }
 
+// Reload swaps the active limits atomically (config hot-reload, v0.7). In-flight
+// Allow calls may observe a mix of old and new values for one tick, which is
+// harmless for rate limiting. Per-client state is dropped so the new limits take
+// effect immediately instead of being diluted by stale buckets / quota counters.
+func (m *TokenBucketManager) Reload(qps float64, dailyQuota int, enabled bool) {
+	m.mu.Lock()
+	m.enabled = enabled
+	m.qps = qps
+	m.dailyQuota = dailyQuota
+	m.buckets = map[string]*tokenBucket{}
+	m.counts = map[string]*dailyCount{}
+	m.mu.Unlock()
+}
+
 // Allow reports whether the given client may proceed right now.
 func (m *TokenBucketManager) Allow(clientID string) bool {
 	if !m.enabled {
