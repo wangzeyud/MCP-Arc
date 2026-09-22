@@ -137,6 +137,46 @@ server:
 | `llm` | 可选 LLM 辅助脱敏：`enabled`、`endpoint`、`api_key`、`model`、`timeout_ms`、`max_bytes`、`cache_ttl_seconds`、`apply_to_result` |
 | `rate_limit` | `enabled`、`qps`、`daily_quota`（按 client_id） |
 | `admin` | `enabled`、`port`、`token`（控制台 Bearer Token） |
+| `alerting` | v0.7 新增的出站 webhook 告警：`enabled`、`webhook.url`、`webhook.secret`（HMAC-SHA256 密钥）、`events`（事件名子集，留空=全部）、`timeout_ms` |
+
+## 配置热加载
+
+多数运行期配置——`rate_limit`、`audit.retention`、`alerting`、以及 `masking` 规则——**无需重启即生效**。mcp-arc 监听配置文件（按 mtime，约每 5s 轮询），并提供手动触发入口：
+
+```bash
+curl -X POST -H "Authorization: Bearer change-me" localhost:8080/api/config/reload
+```
+
+每次热加载都会按新配置重新应用限流器、脱敏器、保留清理 worker 与告警发送器。但 **需要重启才能生效** 的字段——`transport`（client/upstream/listen）、`admin.port`、`audit` 的 driver / dsn、以及 `server.upstream` 命令——无法在运行时变更；这类变更的热加载会触发 `restart_required` 告警（见下），提醒你重启进程。
+
+## 告警（webhook）
+
+mcp-arc 可以把运维事件以 HTTP webhook 形式 POST 出去（v0.7）。在 `config.yaml` 里配置：
+
+```yaml
+alerting:
+  enabled: true
+  timeout_ms: 5000
+  # events：留空或省略 = 全部五个
+  events: [sensitive_detected, rate_limited, audit_error]
+  webhook:
+    url: "https://my.example.com/mcp-arc-alerts"
+    secret: "your-hmac-secret"   # 留空 = 不签名
+```
+
+每次投递都是带 `X-MCPArc-Signature: sha256=<hmac>` 签名的 JSON body（对原始 body 做 HMAC-SHA256，hex 编码）。投递 **best-effort 且 fail-open**：端点故障或超时绝不会阻塞请求或审计写入。
+
+触发的事件：
+
+| 事件 | 触发时机 |
+|---|---|
+| `config_reloaded` | 一次热加载（文件监听或手动触发）成功应用 |
+| `restart_required` | 热加载触碰了需要重启才生效的字段 |
+| `sensitive_detected` | 脱敏层检出了仍需遮蔽的敏感数据（例如 LLM 第二遍抓到静态规则漏网的） |
+| `rate_limited` | 请求被限流器拒绝 |
+| `audit_error` | 审计记录写入失败 |
+
+`events` 留空时，上述五个事件全部发送。
 
 ## 脱敏规则
 
@@ -193,6 +233,8 @@ Vue3 控制台**编译进二进制**（`//go:embed`），由管理 HTTP 服务�
 # 打开 http://localhost:8080  →  仪表盘 / 调用日志 / 规则
 ```
 
+控制台 **Dashboard** 展示实时调用量、错误率，以及延迟 **分位数（P50 / P95 / P99，单位 µs）**，外加按 tool / client 的拆分与每日调用时序。
+
 ## 回放
 每次 `tools/call` 都记录原始（未脱敏）请求参数与上游原始响应。
 ```bash
@@ -203,6 +245,11 @@ curl -X POST -H "Authorization: Bearer change-me" -H "Content-Type: application/
 复用与实时调用相同的 id 改写 / 响应关联机制，stdio 与 SSE 上游都适用。
 
 ## 更新日志
+
+### v0.7 —— 交付增强（配置热加载 + 告警 webhook + 统计）
+- **配置热加载** —— `rate_limit`、`audit.retention`、`alerting`、以及 `masking` 规则现在支持运行期生效：监听配置文件（mtime，约每 5s 轮询），`POST /api/config/reload` 手动触发。限流器、脱敏器、保留清理 worker、告警发送器都会按新配置重新应用。若热加载触碰了需要重启才生效的字段（`transport`、`admin.port`、`audit` driver/dsn、`server.upstream`），不再静默 no-op，而是触发 `restart_required` 告警。
+- **告警 webhook** —— 把运维事件（`config_reloaded`、`restart_required`、`sensitive_detected`、`rate_limited`、`audit_error`）以 HTTP 形式出站。JSON body 带 `X-MCPArc-Signature: sha256=<hmac>`（HMAC-SHA256）签名；投递 best-effort 且 fail-open，端点故障绝不会阻塞请求或审计写入。
+- **统计增强** —— 控制台 Dashboard 现在展示延迟 **分位数（P50 / P95 / P99）**（取代原先恒为 0 的均值），外加错误率、按 `client_id` / `tool` 的拆分与每日调用时序，全部由服务端基于审计库实时聚合。
 
 ### v0.6 —— 四件套打磨（回放 + 审计保留）
 - **批量回放** —— `POST /api/replay/batch` 一次性重发多条已记录的 `tools/call`，支持显式 `call_ids` 列表或用 `filter`（tool / client_id / since / until / limit）解析。顺序执行，复用同一套 id 改写/关联机制；单条失败只记录、不中断其余。
@@ -237,6 +284,7 @@ curl -X POST -H "Authorization: Bearer change-me" -H "Content-Type: application/
 - **v0.4** ✅——稳定性 / soak 测试 + race 验证（内部质量，非新功能）。
 - **v0.5** ✅——规范对齐（MCP 2026-07-28）：Streamable HTTP 传输、方法无关透传、通知作用域与取消传播（客户端断开取消在途上游）、`InputRequiredResult` 审计；SSE 标记 legacy。
 - **v0.6** ✅——四件套打磨：批量回放 + 回放 Diff（`/api/replay/batch`，与记录结果精确 JSON 比对）、审计保留（`audit.retention` 的 max_age_days/max_rows，启动裁剪 + 周期 worker）、控制台多选回放 UI。
+- **v0.7** ✅——交付增强：配置热加载（文件监听 + `POST /api/config/reload`；rate_limit/retention/alerting/masking 热应用；需重启字段改了会告警）、告警 webhook（HMAC 签名、fail-open、5 类事件）、统计增强（延迟 P50/P95/P99、错误率、按 client/tool、每日时序）。
 
 ## License
 MIT —— 见 [LICENSE](./LICENSE)。

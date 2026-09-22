@@ -142,6 +142,46 @@ See `config.yaml`.
 | `llm` | optional LLM-assisted masking: `enabled`, `endpoint`, `api_key`, `model`, `timeout_ms`, `max_bytes`, `cache_ttl_seconds`, `apply_to_result` |
 | `rate_limit` | `enabled`, `qps`, `daily_quota` (per `client_id`) |
 | `admin` | `enabled`, `port`, `token` (console Bearer token) |
+| `alerting` | outbound webhook notifications (v0.7): `enabled`, `webhook.url`, `webhook.secret` (HMAC-SHA256 key), `events` (subset of event names, or empty = all), `timeout_ms` |
+
+## Configuration hot reload
+
+Most operational config — `rate_limit`, `audit.retention`, `alerting`, and `masking` rules — applies **without a restart**. mcp-arc watches the config file (mtime, polled every ~5s) and also exposes a manual trigger:
+
+```bash
+curl -X POST -H "Authorization: Bearer change-me" localhost:8080/api/config/reload
+```
+
+On every reload the rate limiter, masker, retention worker, and alert sender are re-applied from the new config. Changes to **restart-required** fields — `transport` (client/upstream/listen), `admin.port`, the `audit` driver or `dsn`, and `server.upstream` — cannot take effect at runtime; a reload instead fires a `restart_required` alert (see below) reminding you to restart the process.
+
+## Alerting (webhook)
+
+mcp-arc can POST operational events to an HTTP webhook (v0.7). Configure it in `config.yaml`:
+
+```yaml
+alerting:
+  enabled: true
+  timeout_ms: 5000
+  # events: empty or omitted = all five
+  events: [sensitive_detected, rate_limited, audit_error]
+  webhook:
+    url: "https://my.example.com/mcp-arc-alerts"
+    secret: "your-hmac-secret"   # empty = no signature
+```
+
+Each delivery is a JSON body signed with `X-MCPArc-Signature: sha256=<hmac>` (HMAC-SHA256 over the raw body, hex-encoded). Delivery is **best-effort and fail-open**: a broken or slow endpoint never blocks a request or an audit write.
+
+Emitted events:
+
+| event | when |
+|---|---|
+| `config_reloaded` | a hot reload (file watch or manual trigger) applied successfully |
+| `restart_required` | a reload touched a restart-required field |
+| `sensitive_detected` | the masking layer detected sensitive data requiring redaction (e.g. the LLM second pass caught what static rules missed) |
+| `rate_limited` | a request was rejected by the rate limiter |
+| `audit_error` | an audit record could not be persisted |
+
+When `events` is empty, all five are sent.
 
 ## Masking rules
 
@@ -204,6 +244,8 @@ Vue3 console compiled into the binary (`//go:embed`), served by the admin HTTP s
 # open http://localhost:8080  →  Dashboard / Call Logs / Rules
 ```
 
+The **Dashboard** shows live call volume, error rate, and latency **percentiles (P50 / P95 / P99 in µs)**, plus per-tool and per-client breakdowns and a daily call series.
+
 ## Replay
 Every `tools/call` is recorded with its original (unmasked) request params and raw upstream response.
 ```bash
@@ -214,6 +256,11 @@ curl -X POST -H "Authorization: Bearer change-me" -H "Content-Type: application/
 Rides the same id-rewrite / response-correlation machinery as a live call (stdio + SSE upstreams).
 
 ## Changelog
+
+### v0.7 — delivery enhancements (config hot reload + alerting webhook + stats)
+- **Configuration hot reload** — `rate_limit`, `audit.retention`, `alerting`, and `masking` rules now apply at runtime: the config file is watched (mtime, polled ~5s) and `POST /api/config/reload` triggers a manual reload. The rate limiter, masker, retention worker, and alert sender are re-applied from the new config. Reloads that touch restart-required fields (`transport`, `admin.port`, `audit` driver/dsn, `server.upstream`) fire a `restart_required` alert instead of silently no-op'ing.
+- **Alerting webhook** — outbound HTTP notifications for operational events (`config_reloaded`, `restart_required`, `sensitive_detected`, `rate_limited`, `audit_error`). JSON body signed with `X-MCPArc-Signature: sha256=<hmac>` (HMAC-SHA256); delivery is best-effort and fail-open so a broken endpoint never blocks the request path or audit writes.
+- **Stats enhancement** — the console Dashboard now shows latency **percentiles (P50 / P95 / P99)** instead of an always-zero average, plus error rate and per-`client_id` / per-`tool` breakdowns and a daily call series, all computed server-side from the audit store.
 
 ### v0.6 — four-pillar polish (replay + audit retention)
 - **Batch replay** — `POST /api/replay/batch` re-issues many recorded `tools/call`s at once, either by explicit `call_ids` or by a `filter` (tool / client_id / since / until / limit). Replays run sequentially reusing the same id-rewrite / correlation path; a single failure is recorded and the rest continue.
@@ -248,6 +295,7 @@ Rides the same id-rewrite / response-correlation machinery as a live call (stdio
 - **v0.4** ✅ — stability / soak testing + race verification (internal quality; no new features).
 - **v0.5** ✅ — spec alignment (MCP 2026-07-28): Streamable HTTP transport, method-agnostic passthrough, notification scoping & cancellation propagation (client disconnect cancels in-flight upstream), `InputRequiredResult` audit; SSE marked legacy.
 - **v0.6** ✅ — four-pillar polish: batch replay + replay diff (`/api/replay/batch`, exact JSON comparison vs recorded result), audit retention (`audit.retention` max_age_days/max_rows with startup trim + periodic worker), console multi-select replay UI.
+- **v0.7** ✅ — delivery enhancements: configuration hot reload (file watch + `POST /api/config/reload`; rate_limit / retention / alerting / masking hot-applied; restart-required fields alerted), alerting webhook (HMAC-signed, fail-open, 5 event types), stats enhancement (latency P50/P95/P99, error rate, per-client/tool, daily series).
 
 ## License
 MIT — see [LICENSE](./LICENSE).
