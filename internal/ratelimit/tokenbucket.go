@@ -2,6 +2,7 @@ package ratelimit
 
 import (
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -9,7 +10,7 @@ import (
 // (for QPS) plus a daily quota counter.
 type TokenBucketManager struct {
 	mu         sync.Mutex
-	enabled    bool
+	enabled    atomic.Bool
 	qps        float64
 	dailyQuota int
 	buckets    map[string]*tokenBucket
@@ -31,13 +32,14 @@ type dailyCount struct {
 // NewTokenBucketManager creates a manager. When enabled is false, Allow always
 // returns true (no limiting).
 func NewTokenBucketManager(qps float64, dailyQuota int, enabled bool) *TokenBucketManager {
-	return &TokenBucketManager{
-		enabled:    enabled,
+	m := &TokenBucketManager{
 		qps:        qps,
 		dailyQuota: dailyQuota,
 		buckets:    map[string]*tokenBucket{},
 		counts:     map[string]*dailyCount{},
 	}
+	m.enabled.Store(enabled)
+	return m
 }
 
 // Reload swaps the active limits atomically (config hot-reload, v0.7). In-flight
@@ -46,7 +48,7 @@ func NewTokenBucketManager(qps float64, dailyQuota int, enabled bool) *TokenBuck
 // effect immediately instead of being diluted by stale buckets / quota counters.
 func (m *TokenBucketManager) Reload(qps float64, dailyQuota int, enabled bool) {
 	m.mu.Lock()
-	m.enabled = enabled
+	m.enabled.Store(enabled)
 	m.qps = qps
 	m.dailyQuota = dailyQuota
 	m.buckets = map[string]*tokenBucket{}
@@ -56,7 +58,7 @@ func (m *TokenBucketManager) Reload(qps float64, dailyQuota int, enabled bool) {
 
 // Allow reports whether the given client may proceed right now.
 func (m *TokenBucketManager) Allow(clientID string) bool {
-	if !m.enabled {
+	if !m.enabled.Load() {
 		return true
 	}
 	m.mu.Lock()
